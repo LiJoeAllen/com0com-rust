@@ -8,7 +8,7 @@ description = "WDM port function driver for the Rust com0com rewrite. Handles IO
 com0com-common = { path = "../com0com-common" }
 wdk-sys = "0.4"
 wdk-alloc = "0.3"
-wdk-panic = "0.3"
+wdk-panic = "0.4"
 
 [build-dependencies]
 wdk-build = "0.5"
