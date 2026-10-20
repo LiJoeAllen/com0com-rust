@@ -10,3 +10,6 @@
 *.sys
 *.exe
 *.pdb
+
+# 本地 Agent 数据（WorkBuddy 项目记忆等，不入版本库）
+.workbuddy/
