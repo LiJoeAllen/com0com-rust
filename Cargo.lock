@@ -236,7 +236,7 @@ name = "com0com-setupc"
 version = "0.1.0"
 dependencies = [
  "com0com-common",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

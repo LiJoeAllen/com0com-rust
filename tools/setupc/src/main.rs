@@ -85,11 +85,13 @@ fn bus_device_path() -> Result<String, String> {
         SetupDiGetClassDevsW(
             &guid,
             null(),
-            0, // hwndparent: HWND (isize) — no parent window.
+            null_mut(), // hwndparent: HWND (*mut c_void) — no parent window.
             DIGCF_PRESENT | DIGCF_DEVICEINTERFACE,
         )
     };
-    if hdev == INVALID_HANDLE_VALUE {
+    // HDEVINFO 在 0.61 中仍为 isize，而 INVALID_HANDLE_VALUE 已是 HANDLE
+    // （= *mut c_void，值为 -1），两者类型不同，需先转型再比较。
+    if hdev == INVALID_HANDLE_VALUE as isize {
         return Err(format!("SetupDiGetClassDevsW failed (Win32 {})", unsafe {
             GetLastError()
         }));
@@ -157,7 +159,7 @@ fn open_bus() -> Result<HANDLE, String> {
             null(),
             OPEN_EXISTING,
             FILE_ATTRIBUTE_NORMAL,
-            0, // htemplatefile: HANDLE (isize) — not a file template.
+            null_mut(), // htemplatefile: HANDLE (*mut c_void) — not a file template.
         )
     };
     if handle == INVALID_HANDLE_VALUE {
