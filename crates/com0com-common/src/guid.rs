@@ -52,11 +52,13 @@ mod tests {
 
     #[test]
     fn comport_guid_parts_are_correct() {
-        // GUID_DEVINTERFACE_COMPORT = 86E0D1E0-8089-D011-9CE4-08003E301F73
+        // GUID_DEVINTERFACE_COMPORT = {86E0D1E0-8089-D011-9CE4-08003E301F73}
+        // 注意：GUID 字符串形式是"大端显示"，Data2/Data3 字段是小端存储：
+        // 字符串 D011 对应字节 d0 11 -> Data3 = 0x11D0。
         let p = guid_parts(&GUID_DEVINTERFACE_COMPORT);
         assert_eq!(p.data1, 0x86E0_D1E0);
         assert_eq!(p.data2, 0x8089);
-        assert_eq!(p.data3, 0xD011);
+        assert_eq!(p.data3, 0x11D0);
         assert_eq!(p.data4, [0x9C, 0xE4, 0x08, 0x00, 0x3E, 0x30, 0x1F, 0x73]);
         assert_eq!(guid_bytes(&p), GUID_DEVINTERFACE_COMPORT);
     }

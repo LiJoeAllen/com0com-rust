@@ -466,8 +466,8 @@ mod tests {
         assert_eq!(IOCTL_SERIAL_GET_BAUD_RATE, 0x001B_0050);
         assert_eq!(IOCTL_SERIAL_GET_MODEMSTATUS, 0x001B_0068);
         assert_eq!(IOCTL_SERIAL_SET_MODEM_CONTROL, 0x001B_0098);
-        assert_eq!(IOCTL_SERIAL_GET_COMMCONFIG, 0x001B_00B4); // fn 33 -> 33<<2=0x84
-        assert_eq!(IOCTL_SERIAL_SET_COMMCONFIG, 0x001B_00B8); // fn 34 -> 34<<2=0x88
+        assert_eq!(IOCTL_SERIAL_GET_COMMCONFIG, 0x001B_0084); // fn 33 -> 33<<2 = 0x84
+        assert_eq!(IOCTL_SERIAL_SET_COMMCONFIG, 0x001B_0088); // fn 34 -> 34<<2 = 0x88
     }
 
     /// The private com0com bus IOCTLs use a distinct device type and access
