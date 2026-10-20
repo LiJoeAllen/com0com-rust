@@ -15,7 +15,7 @@ jobs:
     name: fmt + clippy + test (host-buildable)
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # .agent/skills/* 是通过 .gitmodules 管理的第三方技能仓库
           submodules: recursive
@@ -62,7 +62,7 @@ jobs:
       security-events: write
       checks: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # OpenSSF/SSDF：对依赖树做 CVE 审计，发现漏洞即失败。
       # 已知接受的“非漏洞”信息项：RUSTSEC-2024-0436（paste 未维护，
       # wdk 工具链的传递依赖，无补丁版本，不影响本项目安全态势）。
@@ -78,7 +78,7 @@ jobs:
     # runner 上，通过设置仓库变量 RUN_WDK_BUILD=true 手动启用后再触发。
     if: github.event_name == 'workflow_dispatch' && vars.RUN_WDK_BUILD == 'true'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
       - name: Install Rust toolchain
