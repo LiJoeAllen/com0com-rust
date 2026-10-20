@@ -3,20 +3,37 @@ resolver = "2"
 members = [
     # Shared, host-buildable (no_std, no WDK) data/IOCTL definitions.
     "crates/com0com-common",
-    # Kernel drivers — built with `cargo wdk build -p <name>` inside the eWDK.
-    # They cannot be compiled by a bare `cargo build` because they depend on
-    # the WDK (wdk / wdk-sys / wdk-build).
-    "crates/com0combus",
-    "crates/com0comport",
     # User-mode configuration tool — a normal std Win32 binary, buildable with
     # a plain `cargo build -p com0com-setupc`.
     "tools/setupc",
 ]
 
-# A bare `cargo build` only builds the host-buildable crates. Building the
-# kernel drivers explicitly selects them with `cargo wdk build -p ...`, which
-# sets up the WDK environment. This keeps `cargo build`/CI checks green on a
-# machine that has no WDK installed.
+# The two kernel drivers are deliberately NOT workspace members: each of them is
+# its own workspace root (see the `[workspace]` table in their Cargo.toml).
+#
+# Rationale: `wdk-build` walks the *entire* cargo-metadata dependency graph and
+# requires exactly ONE WDK driver-model configuration in it. `com0combus`
+# declares KMDF 1.33 while `com0comport` declares WDM — the mixed driver model is
+# an intentional design decision (see README "架构（混合驱动模型）"). Keeping both
+# in a single graph makes *every* build abort with:
+#     multiple configurations of the WDK are detected across the dependency
+#     graph, but only one configuration is allowed: { Kmdf(1,33), Wdm }
+# even when only one driver is selected with `-p`. Splitting them into separate
+# workspaces keeps each dependency graph single-configuration.
+#
+# Build them from their own directory (their `[profile.*] panic = "abort"` is
+# honored there as well, because each driver is a workspace root):
+#     cargo build --manifest-path crates/com0combus/Cargo.toml
+#     cargo build --manifest-path crates/com0comport/Cargo.toml
+exclude = [
+    "crates/com0combus",
+    "crates/com0comport",
+]
+
+# A bare `cargo build` only builds the host-buildable crates. The kernel drivers
+# cannot be compiled by a bare `cargo build` because they depend on the WDK
+# (wdk / wdk-sys / wdk-build). This keeps `cargo build`/`cargo test`/CI green on
+# a machine that has no WDK installed.
 default-members = [
     "crates/com0com-common",
     "tools/setupc",

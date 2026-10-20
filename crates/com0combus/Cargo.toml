@@ -4,6 +4,13 @@ version = "0.1.0"
 edition = "2021"
 description = "KMDF bus driver for the Rust com0com rewrite. Enumerates virtual port PDOs and owns the shared per-pair state."
 
+# Own workspace root. The root workspace `exclude`s this crate because wdk-build
+# requires exactly one WDK driver-model configuration per dependency graph, and
+# com0comport declares WDM while this crate declares KMDF. Being a workspace root
+# also means the `[profile.*]` sections below are honored instead of being
+# ignored with a cargo warning.
+[workspace]
+
 [dependencies]
 com0com-common = { path = "../com0com-common" }
 wdk = "0.3"
@@ -17,6 +24,7 @@ wdk-build = "0.5"
 [lib]
 crate-type = ["cdylib"]
 
+# Kernel-mode has no unwinding runtime.
 [profile.dev]
 panic = "abort"
 [profile.release]

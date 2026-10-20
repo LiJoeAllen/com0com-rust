@@ -4,6 +4,13 @@ version = "0.1.0"
 edition = "2021"
 description = "WDM port function driver for the Rust com0com rewrite. Handles IOCTL_SERIAL_* and the cross-port data path."
 
+# Own workspace root. The root workspace `exclude`s this crate because wdk-build
+# requires exactly one WDK driver-model configuration per dependency graph, and
+# com0combus declares KMDF while this crate declares WDM. Being a workspace root
+# also means the `[profile.*]` sections below are honored instead of being
+# ignored with a cargo warning.
+[workspace]
+
 [dependencies]
 com0com-common = { path = "../com0com-common" }
 wdk-sys = "0.4"
@@ -16,6 +23,7 @@ wdk-build = "0.5"
 [lib]
 crate-type = ["cdylib"]
 
+# Kernel-mode has no unwinding runtime.
 [profile.dev]
 panic = "abort"
 [profile.release]

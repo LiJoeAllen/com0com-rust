@@ -1,5 +1,5 @@
-# Rust 构建产物
-/target
+# Rust 构建产物（含各独立 workspace 根，如 crates/com0combus/target）
+target/
 
 # OS / 编辑器
 .DS_Store
