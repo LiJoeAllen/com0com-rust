@@ -199,13 +199,13 @@ fn ioctl(handle: HANDLE, code: u32, in_buf: &[u8], out_buf: &mut [u8]) -> Result
             handle,
             code,
             if in_buf.is_empty() {
-                null() as *const c_void
+                std::ptr::null::<c_void>()
             } else {
                 in_buf.as_ptr() as *const c_void
             },
             in_buf.len() as u32,
             if out_buf.is_empty() {
-                null_mut() as *mut c_void
+                std::ptr::null_mut::<c_void>()
             } else {
                 out_buf.as_mut_ptr() as *mut c_void
             },
@@ -432,8 +432,14 @@ fn cmd_params(args: &[String]) -> Result<(), String> {
     let a = wide_buf_to_string(&p.port_name[0]);
     let b = wide_buf_to_string(&p.port_name[1]);
     println!("Pair {id}");
-    println!("  PortA:      {}", if a.is_empty() { "(auto)" } else { &a });
-    println!("  PortB:      {}", if b.is_empty() { "(auto)" } else { &b });
+    println!(
+        "  PortA:      {}",
+        if a.is_empty() { "(auto)" } else { a.as_str() }
+    );
+    println!(
+        "  PortB:      {}",
+        if b.is_empty() { "(auto)" } else { b.as_str() }
+    );
     println!("  Flags:      {}", describe_flags(&p));
     println!(
         "  PinWiring:  A={:02x?} B={:02x?}",
