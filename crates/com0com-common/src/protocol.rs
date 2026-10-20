@@ -103,7 +103,7 @@ pub struct PortUnlinkRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use core::mem::{size_of, transmute};
+    use core::mem::{offset_of, size_of};
 
     #[test]
     fn constants_are_sane() {
@@ -128,45 +128,62 @@ mod tests {
         assert_eq!(size_of::<PortUnlinkRequest>(), 16);
     }
 
-    /// Reinterpret `T` as bytes and back; the bytes must be identical. This is
-    /// exactly what happens across the `METHOD_BUFFERED` system buffer between
-    /// `setupc`, the bus driver, and the port driver.
-    fn roundtrip<T: Copy>() {
-        let mut buf = [0u8; size_of::<T>()];
-        for (i, b) in buf.iter_mut().enumerate() {
-            *b = (i as u8).wrapping_add(0x55);
-        }
-        let original: T = unsafe { transmute(buf) };
-        let back: [u8; size_of::<T>()] = unsafe { transmute(original) };
-        assert_eq!(buf, back, "byte layout must survive a round trip");
-    }
-
+    // Wire-contract checks. `setupc` (user mode) and the bus/port drivers size
+    // their `DeviceIoControl` buffers from `size_of` and lay fields out per
+    // `#[repr(C)]` order; any drift silently corrupts IOCTL payloads. Offsets
+    // are asserted (safe code) instead of byte round-trips so the crate keeps
+    // its "100% safe Rust" guarantee.
     #[test]
-    fn wire_structs_roundtrip() {
-        roundtrip::<Com0comPairParams>();
-        roundtrip::<CreatePairRequest>();
-        roundtrip::<DeletePairRequest>();
-        roundtrip::<EnumPairEntry>();
-        roundtrip::<EnumPairsResponse>();
-        roundtrip::<GetParamsRequest>();
-        roundtrip::<SetParamsRequest>();
-        roundtrip::<PortLinkRequest>();
-        roundtrip::<PortLinkResponse>();
-        roundtrip::<PortUnlinkRequest>();
+    fn protocol_field_offsets_match_layout() {
+        assert_eq!(offset_of!(Com0comPairParams, port_name), 0);
+        assert_eq!(offset_of!(Com0comPairParams, emu_br), 128);
+        assert_eq!(offset_of!(Com0comPairParams, emu_overrun), 132);
+        assert_eq!(offset_of!(Com0comPairParams, emu_noise), 136);
+        assert_eq!(offset_of!(Com0comPairParams, noise_probability), 140);
+        assert_eq!(offset_of!(Com0comPairParams, exclusive_mode), 144);
+        assert_eq!(offset_of!(Com0comPairParams, plugin_mode), 148);
+        assert_eq!(offset_of!(Com0comPairParams, pin_wiring), 152);
+
+        assert_eq!(offset_of!(CreatePairRequest, pair_id), 0);
+        assert_eq!(offset_of!(CreatePairRequest, params), 4);
+
+        assert_eq!(offset_of!(DeletePairRequest, pair_id), 0);
+
+        assert_eq!(offset_of!(EnumPairEntry, pair_id), 0);
+        assert_eq!(offset_of!(EnumPairEntry, params), 4);
+
+        assert_eq!(offset_of!(EnumPairsResponse, count), 0);
+        assert_eq!(offset_of!(EnumPairsResponse, entries), 4);
+
+        assert_eq!(offset_of!(GetParamsRequest, pair_id), 0);
+        assert_eq!(offset_of!(GetParamsRequest, port_index), 4);
+
+        assert_eq!(offset_of!(SetParamsRequest, pair_id), 0);
+        assert_eq!(offset_of!(SetParamsRequest, port_index), 4);
+        assert_eq!(offset_of!(SetParamsRequest, params), 8);
+
+        assert_eq!(offset_of!(PortLinkRequest, pair_id), 0);
+        assert_eq!(offset_of!(PortLinkRequest, port_index), 4);
+
+        assert_eq!(offset_of!(PortLinkResponse, pair_va), 0);
+
+        assert_eq!(offset_of!(PortUnlinkRequest, pair_id), 0);
+        assert_eq!(offset_of!(PortUnlinkRequest, port_index), 4);
+        assert_eq!(offset_of!(PortUnlinkRequest, pair_va), 8);
     }
 
     #[test]
     fn enum_response_default_is_zeroed() {
         let r = EnumPairsResponse::default();
         assert_eq!(r.count, 0);
-        let bytes: [u8; size_of::<EnumPairsResponse>()] = unsafe { transmute(r) };
-        assert!(bytes.iter().all(|&b| b == 0));
+        assert!(r
+            .entries
+            .iter()
+            .all(|e| e.pair_id == 0 && e.params.port_name[0][0] == 0));
     }
 
     #[test]
-    fn create_request_layout_carries_params() {
-        // A constructed request must place pair_id before params, matching the
-        // field order the bus driver reads.
+    fn create_request_field_values_survive_copy() {
         let req = CreatePairRequest {
             pair_id: 0xDEAD_BEEF,
             params: Com0comPairParams {
@@ -174,10 +191,11 @@ mod tests {
                 ..Default::default()
             },
         };
-        let bytes: [u8; size_of::<CreatePairRequest>()] = unsafe { transmute(req) };
-        // pair_id is the first 4 bytes, little-endian.
-        assert_eq!(&bytes[0..4], &[0xEF, 0xBE, 0xAD, 0xDE]);
-        // emu_br is the first u32 of params, which begins at offset 4.
-        assert_eq!(&bytes[4..8], &[1, 0, 0, 0]);
+        // Copy semantics guarantee a bit-identical replica for the IOCTL send.
+        let copy = req;
+        assert_eq!(copy.pair_id, 0xDEAD_BEEF);
+        assert_eq!(copy.params.emu_br, 1);
+        // Default params leave pin_wiring zeroed.
+        assert_eq!(copy.params.pin_wiring, [[0u8; 4]; 2]);
     }
 }

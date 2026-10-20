@@ -60,9 +60,9 @@ impl RingBuffer {
     pub fn write(&mut self, src: &[u8]) -> usize {
         let free = self.available_to_write();
         let n = free.min(src.len());
-        for i in 0..n {
+        for &b in &src[..n] {
             let pos = Self::mask(self.head);
-            self.data[pos] = src[i];
+            self.data[pos] = b;
             self.head = (self.head + 1) % RING_BUFFER_SIZE as u32;
         }
         n
@@ -72,9 +72,9 @@ impl RingBuffer {
     pub fn read(&mut self, dst: &mut [u8]) -> usize {
         let avail = self.available_to_read();
         let n = avail.min(dst.len());
-        for i in 0..n {
+        for slot in dst.iter_mut().take(n) {
             let pos = Self::mask(self.tail);
-            dst[i] = self.data[pos];
+            *slot = self.data[pos];
             self.tail = (self.tail + 1) % RING_BUFFER_SIZE as u32;
         }
         n
@@ -82,6 +82,12 @@ impl RingBuffer {
 
     pub fn is_empty(&self) -> bool {
         self.available_to_read() == 0
+    }
+}
+
+impl Default for RingBuffer {
+    fn default() -> Self {
+        RingBuffer::new()
     }
 }
 
@@ -136,6 +142,12 @@ impl PortState {
                 ParityErrorCount: 0,
             },
         }
+    }
+}
+
+impl Default for PortState {
+    fn default() -> Self {
+        PortState::new()
     }
 }
 

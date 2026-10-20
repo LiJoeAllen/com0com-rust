@@ -172,11 +172,11 @@ mod tests {
 
     #[test]
     fn default_pin_wiring_maps_all_lines() {
-        for role in 0..2 {
-            assert_eq!(DEFAULT_PIN_WIRING[role][0], SERIAL_CTS_STATE);
-            assert_eq!(DEFAULT_PIN_WIRING[role][1], SERIAL_DSR_STATE);
-            assert_eq!(DEFAULT_PIN_WIRING[role][2], SERIAL_DCD_STATE);
-            assert_eq!(DEFAULT_PIN_WIRING[role][3], SERIAL_RI_STATE);
+        for wiring in &DEFAULT_PIN_WIRING {
+            assert_eq!(wiring[0], SERIAL_CTS_STATE);
+            assert_eq!(wiring[1], SERIAL_DSR_STATE);
+            assert_eq!(wiring[2], SERIAL_DCD_STATE);
+            assert_eq!(wiring[3], SERIAL_RI_STATE);
         }
     }
 

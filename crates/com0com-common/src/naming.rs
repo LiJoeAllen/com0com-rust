@@ -69,9 +69,7 @@ pub fn format_decimal(mut v: u32) -> [u8; 12] {
     let mut k = i;
     while j < k {
         k -= 1;
-        let t = d[j];
-        d[j] = d[k];
-        d[k] = t;
+        d.swap(j, k);
         j += 1;
     }
     d
@@ -196,7 +194,8 @@ mod tests {
         assert_eq!(n, 5); // 4 chars + NUL
         assert_eq!(buf[0], b'C' as u16);
         assert_eq!(buf[4], 0);
-        let back: Vec<u8> = buf[..4].iter().map(|&c| c as u8).collect();
+        // no_std crate: no Vec in tests; use a fixed-size array.
+        let back = [buf[0] as u8, buf[1] as u8, buf[2] as u8, buf[3] as u8];
         assert_eq!(&back, ascii);
     }
 }
