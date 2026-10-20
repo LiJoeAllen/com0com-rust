@@ -63,11 +63,13 @@
     shallow = true
 
 # claude-mods：专家技能/agents/commands/rules/hooks 集合。
-[submodule ".agent/skills/claude-mods"]
-    path = .agent/skills/claude-mods
-    url = https://github.com/0xDarkMatter/claude-mods.git
-    branch = main
-    shallow = true
+# 暂时注释：其 skills/security-ops/tests/fixtures/bad/ 下的恶意代码夹具会被本机
+# 杀软隔离，导致子模块工作树始终处于脏状态（无法用 git 恢复），暂不纳入。
+# [submodule ".agent/skills/claude-mods"]
+#     path = .agent/skills/claude-mods
+#     url = https://github.com/0xDarkMatter/claude-mods.git
+#     branch = main
+#     shallow = true
 
 # claude-code-kit：精选 agents/skills/settings 工具包。
 [submodule ".agent/skills/claude-code-kit"]
