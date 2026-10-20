@@ -37,9 +37,17 @@ KMDF 总线 FDO 枚举两个 WDM 端口 PDO，共享 `PairContext`（非分页�
 | `.agent/skills/anthropic-skills/` | anthropics/skills（官方） | skill-creator、docx/pdf/xlsx/pptx 文档产出、mcp-builder、webapp-testing |
 | `.agent/skills/superpowers/` | obra/superpowers | TDD、systematic-debugging、writing-plans、code review、verification-before-completion、git worktrees |
 | `.agent/skills/rust-agentic-skills/` | bapuqln/rust-agentic-skills（含 Rust Kernel / Lint Hunter） | 内核态 Rust：IRQL、IRP、spinlock 经验与 lint 纪律 |
+| `.agent/skills/use-git/` | changjian-k2k/use-git | Git 日常使用技能 |
+| `.agent/skills/git-workflow-skill/` | netresearch/git-workflow-skill | Git 工作流最佳实践：分支策略、提交规范、code review |
+| `.agent/skills/claude-mods/` | 0xDarkMatter/claude-mods | 专家技能、agents、commands、rules、hooks 集合 |
+| `.agent/skills/claude-code-kit/` | tassiovale/claude-code-kit | 精选 agents/skills/settings 工具包 |
+| `.agent/skills/aiskillstore-marketplace/` | aiskillstore/marketplace（安全审计技能市场，~1GB，shallow 克隆） | 按需检索安全审计过的技能 |
+| `.agent/skills/skills-agents-ai-coding/` | mir-am/skills-agents-ai-coding | AI 编码助手的 Agents & Skills |
+| `.agent/skills/git-skills/` | full-stack-skills/git-skills | 九个可独立安装的 Git 工作流与分支治理技能 |
 
 > 子模块是只读参考：`git submodule update --init --recursive` 拉取；**不要**把子模块
-> 内容提交进本仓库，只提交指针。
+> 内容提交进本仓库，只提交指针。`git pull` 后 post-merge 钩子会自动同步子模块
+> （`.githooks/post-merge`），无需手动执行。
 
 ## 常用命令
 

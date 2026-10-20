@@ -55,10 +55,12 @@ jobs:
   audit:
     name: cargo audit (RUSTSEC 依赖漏洞)
     runs-on: ubuntu-latest
-    # SARIF 结果上传到 GitHub Code Scanning 需要 security-events: write。
+    # SARIF 结果上传到 GitHub Code Scanning 需要 security-events: write；
+    # rustsec/audit-check 创建 check run 需要 checks: write。
     permissions:
       contents: read
       security-events: write
+      checks: write
     steps:
       - uses: actions/checkout@v4
       # OpenSSF/SSDF：对依赖树做 CVE 审计，发现漏洞即失败。

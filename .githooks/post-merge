@@ -1,0 +1,15 @@
+#!/bin/sh
+# ---------------------------------------------------------------------------
+# com0com-rust：git pull / merge 之后自动同步子模块。
+#
+# 触发时机：git pull（ internally = fetch + merge ）成功合并后，post-merge 钩子
+# 自动运行，把 .gitmodules 登记的所有第三方技能子模块拉取/更新到锁定提交。
+# 无需再手动 `git submodule update --init --recursive`。
+#
+# 新增子模块后如未克隆（目录不存在），该钩子同样负责初始化。
+# ---------------------------------------------------------------------------
+set -e
+
+echo "[post-merge] git submodule update --init --recursive"
+git submodule update --init --recursive
+echo "[post-merge] submodules 已同步"

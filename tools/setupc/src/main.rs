@@ -443,7 +443,7 @@ fn cmd_params(args: &[String]) -> Result<(), String> {
     println!("  Flags:      {}", describe_flags(&p));
     println!(
         "  PinWiring:  A={:02x?} B={:02x?}",
-        &p.pin_wiring[0], &p.pin_wiring[1]
+        p.pin_wiring[0], p.pin_wiring[1]
     );
     Ok(())
 }
