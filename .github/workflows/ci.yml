@@ -1,0 +1,81 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: fmt + clippy + test (host-buildable)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # .agent/skills/* 是通过 .gitmodules 管理的第三方技能仓库
+          submodules: recursive
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      # 项目规则：任何提交/推送前 `cargo fmt --all` 必须干净。
+      # fmt 只跑 rustfmt，不链接、不需要 WDK。
+      - name: fmt check (cargo fmt --all -- --check)
+        run: cargo fmt --all -- --check
+
+      # 只覆盖可在宿主机构建的 crate（com0com-common + tools/setupc）。
+      # 内核 crate（com0combus/com0comport）依赖 WDK，无法在普通 runner 上检查。
+      - name: clippy (deny warnings)
+        run: >-
+          cargo clippy --workspace
+          --exclude com0combus --exclude com0comport
+          --all-targets -- -D warnings
+
+      - name: test (cargo test)
+        run: >-
+          cargo test --workspace
+          --exclude com0combus --exclude com0comport
+
+  audit:
+    name: cargo audit (RUSTSEC 依赖漏洞)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # OpenSSF/SSDF：对依赖树做 CVE 审计，发现漏洞即失败。
+      - name: Run cargo audit
+        uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  wdk-build:
+    name: cargo wdk build (kernel drivers, eWDK 必需)
+    runs-on: windows-latest
+    # 默认不运行：普通 GitHub runner 没有 WDK。仅在配置了 eWDK 的自托管
+    # runner 上，通过设置仓库变量 RUN_WDK_BUILD=true 手动启用后再触发。
+    if: github.event_name == 'workflow_dispatch' && vars.RUN_WDK_BUILD == 'true'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: cargo wdk build (com0combus + com0comport)
+        run: cargo wdk build -p com0combus -p com0comport
+      - name: cargo wdk build com0comport (release)
+        run: cargo wdk build -p com0comport --release

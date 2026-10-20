@@ -1,0 +1,29 @@
+[package]
+name = "com0comport"
+version = "0.1.0"
+edition = "2021"
+description = "WDM port function driver for the Rust com0com rewrite. Handles IOCTL_SERIAL_* and the cross-port data path."
+
+[dependencies]
+com0com-common = { path = "../com0com-common" }
+wdk-sys = "0.4"
+wdk-alloc = "0.3"
+wdk-panic = "0.3"
+
+[build-dependencies]
+wdk-build = "0.4"
+
+[lib]
+crate-type = ["cdylib"]
+
+[profile.dev]
+panic = "abort"
+[profile.release]
+panic = "abort"
+
+# NOTE: crates.io only ships KMDF bindings. For a WDM driver you must clone
+# windows-drivers-rs and configure wdk-sys for the WDM config (see README),
+# then point this crate at the local path dependency. The `driver-type`
+# metadata below is honored by that configuration.
+[package.metadata.wdk.driver-model]
+driver-type = "WDM"

@@ -1,0 +1,23 @@
+[workspace]
+resolver = "2"
+members = [
+    # Shared, host-buildable (no_std, no WDK) data/IOCTL definitions.
+    "crates/com0com-common",
+    # Kernel drivers — built with `cargo wdk build -p <name>` inside the eWDK.
+    # They cannot be compiled by a bare `cargo build` because they depend on
+    # the WDK (wdk / wdk-sys / wdk-build).
+    "crates/com0combus",
+    "crates/com0comport",
+    # User-mode configuration tool — a normal std Win32 binary, buildable with
+    # a plain `cargo build -p com0com-setupc`.
+    "tools/setupc",
+]
+
+# A bare `cargo build` only builds the host-buildable crates. Building the
+# kernel drivers explicitly selects them with `cargo wdk build -p ...`, which
+# sets up the WDK environment. This keeps `cargo build`/CI checks green on a
+# machine that has no WDK installed.
+default-members = [
+    "crates/com0com-common",
+    "tools/setupc",
+]

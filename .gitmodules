@@ -1,0 +1,43 @@
+# com0com-rust 项目 — .agent/skills 第三方技能子模块
+#
+# 这里存放「GitHub 上真实存在、本项目用得上」的第三方 Agent 技能，
+# 全部以 git submodule 形式由 .gitmodules 统一管理（工具无关，.agent 不绑定
+# 任何特定 AI 客户端）。克隆本仓库后：
+#
+#   git submodule update --init --recursive
+#
+# 更新到上游最新：
+#
+#   git submodule update --remote
+#
+# 说明：本项目自己的项目知识不在这里，而在 ../knowledge/（OpenSpec/OpenSSF/
+# PKF/PBH 四层体系）。本目录只放通用第三方技能。
+
+# 1) 265 条 idiomatic Rust 规则（ownership/error handling/unsafe/no_std/testing/clippy）。
+#    对本项目"零 unsafe、no_std、可测试"的约束直接可用。
+[submodule ".agent/skills/rust-skills"]
+    path = .agent/skills/rust-skills
+    url = https://github.com/leonardomso/rust-skills.git
+    branch = master
+
+# 2) Anthropic 官方技能仓库：skill-creator、docx/pdf/xlsx/pptx 文档技能、
+#    mcp-builder、webapp-testing 等。用于文档产出与技能自身的开发。
+[submodule ".agent/skills/anthropic-skills"]
+    path = .agent/skills/anthropic-skills
+    url = https://github.com/anthropics/skills.git
+    branch = main
+
+# 3) Superpowers：TDD、systematic-debugging、writing-plans、requesting/receiving
+#    code-review、verification-before-completion、git worktrees 等工程化技能，
+#    与本项目"完备的测试和工作流"目标一致。
+[submodule ".agent/skills/superpowers"]
+    path = .agent/skills/superpowers
+    url = https://github.com/obra/superpowers.git
+    branch = main
+
+# 4) Rust Agentic Skills：含 "Rust Kernel"、"Lint Hunter" 等技能，
+#    对内核态 Rust（unsafe/KSPIN_LOCK/IRQL/IRP）经验可直接借鉴。
+[submodule ".agent/skills/rust-agentic-skills"]
+    path = .agent/skills/rust-agentic-skills
+    url = https://github.com/bapuqln/rust-agentic-skills.git
+    branch = main

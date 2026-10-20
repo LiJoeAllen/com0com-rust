@@ -1,0 +1,12 @@
+# Rust 构建产物
+/target
+
+# OS / 编辑器
+.DS_Store
+.idea/
+.vscode/
+
+# 内核驱动 / 用户态工具构建产物（不应入库，由 CI/本地构建产生）
+*.sys
+*.exe
+*.pdb

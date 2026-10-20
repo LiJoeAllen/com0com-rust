@@ -1,0 +1,42 @@
+;
+; com0comport.inx — WDM port function driver for the Rust com0com rewrite.
+; Installed on the bus-enumerated PDOs (COM0COM\PORT_A / COM0COM\PORT_B).
+;
+
+[Version]
+Signature   = "$Windows NT$"
+Class       = Ports
+ClassGuid   = {4D36E978-E325-11CE-BFC1-08002BE10318}
+Provider    = %ManufacturerName%
+CatalogFile = com0comport.cat
+DriverVer   = 10/20/2026,0.1.0.0
+
+[DestinationDirs]
+DefaultDestDir = 12 ; %SystemRoot%\System32\drivers
+
+[Manufacturer]
+%ManufacturerName% = Com0comPort, NTamd64
+
+[Com0comPort.NTamd64]
+%PortADescription% = Com0comPort_Install, COM0COM\PORT_A
+%PortBDescription% = Com0comPort_Install, COM0COM\PORT_B
+
+[Com0comPort_Install.NTamd64.Services]
+AddService = com0comport, 0x00000002, Com0comPort_Service
+
+[Com0comPort_Install.NTamd64.HW]
+AddReg = Com0comPort_HW_AddReg
+
+[Com0comPort_HW_AddReg]
+; The port driver registers the COMPORT device interface itself.
+
+[Com0comPort_Service]
+ServiceType    = 1   ; SERVICE_KERNEL_DRIVER
+StartType      = 3   ; SERVICE_DEMAND_START
+ErrorControl   = 1   ; SERVICE_ERROR_NORMAL
+ServiceBinary  = %12%\com0comport.sys
+
+[Strings]
+ManufacturerName = "JoeAllen"
+PortADescription = "com0com Port A (Rust)"
+PortBDescription = "com0com Port B (Rust)"

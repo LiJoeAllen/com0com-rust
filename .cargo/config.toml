@@ -1,0 +1,4 @@
+# windows-drivers-rs: static CRT linkage for kernel-mode crates.
+# (wdk-build's configure_wdk_binary_build() adds /NODEFAULTLIB and /ENTRY.)
+[build]
+rustflags = ["-C", "target-feature=+crt-static"]

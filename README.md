@@ -1,0 +1,215 @@
+# com0com-rust
+
+用 Rust 对 **com0com**（Windows 虚拟 null-modem 串口驱动）进行的一次**全量重写**。
+
+目标不是“能加载的雏形”，而是一个真正可用的虚拟串口对仿真器：
+
+- 不限数量的动态串口对（`setupc` 创建/删除）；
+- 完整的 `IOCTL_SERIAL_*` 表面，使 `CreateFile("COMx")` 与整套 Win32 Comm API 透明可用；
+- 两端口之间通过共享内存环缓冲做数据转发，并实现 modem 信号映射；
+- 用户态配置工具 `setupc`（对标原版 `setupc`/`setupg`）。
+
+> ⚠️ **状态**：核心架构、两套驱动源码、共享协议、`setupc` 均已完成并通过类型检查。
+> 内核驱动的**真正编译与加载必须在装有 WDK/eWDK 的机器上进行**（见下文“环境”）。
+> 本仓库在“没有 WDK 的机器”上只能构建 `com0com-common` 与 `setupc` 两个纯用户态/无 std 的包。
+
+---
+
+## 架构（混合驱动模型）
+
+采用**混合模型**：
+
+| 组件 | 模型 | 产物 | 说明 |
+|------|------|------|------|
+| `com0combus`  | **KMDF** 总线驱动 | `com0combus.sys` | 创建根 FDO，枚举每对串口的 2 个 PDO；持有每对共享的 `PairContext`（非分页池），通过私有 IOCTL 暴露给端口驱动与 `setupc`。 |
+| `com0comport` | **WDM** 端口功能驱动 | `com0comport.sys` | 运行在总线枚举出的 PDO 上；实现 `IOCTL_SERIAL_*`，把数据在成对端口间转发；通过 `IOCTL_COM0COM_PORT_LINK` 拿到 `PairContext` 的内核虚地址（同地址空间，裸指针共享合法）。 |
+| `setupc`      | 用户态 Win32 控制台 | `setupc.exe`      | 通过 `GUID_COM0COM_BUS` 设备接口打开总线，发出私有 `IOCTL_COM0COM_*` 来增删查串口对与参数。 |
+| `com0com-common` | 无 std 共享库 | — | `IOCTL_*` 控制码、`SERIAL_*` 结构体、`PairContext`/环缓冲、私有协议结构。内核态与用户态共同依赖，保证线格式一致。 |
+
+**关键设计点**
+
+- 总线为每对分配一个 `PairContext`（含两个 `PortState` 与一把 `KSPIN_LOCK`），放在非分页池；端口驱动通过 `PORT_LINK` 取得内核 VA 并引用计数，两块驱动在同一内核地址空间，裸指针共享有效。
+- 串口对由**兼容 ID** 编码：`c0c0_<pair_id_hex8>_<A|B>`，端口驱动据此恢复 `pair_id`/`port_index`，而不影响 INF 的硬件 ID 匹配。
+- COM 命名：`\DosDevices\COMx` 符号链接 + `GUID_DEVINTERFACE_COMPORT` 设备接口注册，Win32 应用可直接 `CreateFile("COMx")`。
+- 跨驱动共享状态、取消安全的挂起 IRP（read / `WAIT_ON_MASK`）均由 `PairContext` 的自旋锁保护。
+
+---
+
+## 目录结构
+
+```
+com0com-rust/
+├── Cargo.toml                 # 工作区；default-members 仅含可在本机构建的包
+├── crates/
+│   ├── com0com-common/        # 共享（no_std）数据结构/IOCTL/协议
+│   ├── com0combus/            # KMDF 总线驱动（com0combus.sys）
+│   │   ├── src/{bus,driver,pdo,ioctl}.rs
+│   │   ├── com0combus.inx     # 总线 INF 模板
+│   │   └── Makefile.toml      # cargo-wdk 构建脚本
+│   └── com0comport/           # WDM 端口驱动（com0comport.sys）
+│       ├── src/{driver,dispatch,readwrite,serial,comname}.rs
+│       ├── com0comport.inx    # 端口 INF 模板
+│       └── Makefile.toml
+└── tools/
+    └── setupc/                # 用户态配置工具（com0com-setupc）
+        ├── Cargo.toml
+        └── src/main.rs
+```
+
+> 工作区 `default-members` 被设为 `com0com-common` 与 `tools/setupc`，因此一条裸 `cargo build`
+> 只构建这两个可在无 WDK 机器上编译的包，避免去触碰需要 WDK 的内核 crate。
+> 构建内核驱动时显式指定包：`cargo wdk build -p com0combus` / `-p com0comport`。
+
+---
+
+## 环境（在**构建机 / 测试虚拟机**上准备）
+
+内核驱动无法用普通 `cargo build` 产生——它需要 **WDK（Windows Driver Kit）** 提供的
+头文件、库与代码签名链。当前 `windows-drivers-rs` 生态（`wdk` / `wdk-sys` /
+`wdk-build` / `wdk-alloc` / `wdk-panic` / `wdk-macros`）是事实标准，请按以下步骤准备：
+
+1. **安装 WDK / eWDK 与对应 Visual Studio + Windows SDK。**
+   - 推荐用微软的 **eWDK（Enterprise WDK）** 镜像，自带匹配的 SDK 与工具链。
+   - 需要 **Clang/LLVM 17**（WDK 用 Clang 编译内核，而非 MSVC）。
+
+2. **安装 Rust 工具链与 `cargo-wdk`：**
+   ```powershell
+   rustup toolchain install stable
+   cargo install cargo-wdk
+   ```
+   `cargo-wdk` 会在构建时调用 WDK 的 `wdk-build` 生成对应驱动模型（KMDF / WDM）的绑定。
+
+3. **关于 WDM 绑定的注意点（重要）**
+   - crates.io 上的 `wdk-sys` 仅附带一份**预生成的 KMDF v1.33** 绑定作为“无 WDK 机器”的兜底。
+   - 端口驱动是 **WDM**。要让 `wdk-sys` 生成 WDM 绑定，必须在**已安装 WDK** 的环境下构建：
+     `com0comport/Cargo.toml` 中已声明
+     `[package.metadata.wdk.driver-model] driver-type = "WDM"`，
+     `cargo wdk build` 会据此用 WDK 头文件重新生成正确的 WDM 绑定。
+   - 因此：在没有 WDK 的机器上**不要**尝试 `cargo wdk build -p com0comport`，它只会拿到 KMDF 兜底绑定而失败；请在 eWDK 环境构建。
+
+4. **测试虚拟机（用于实际加载驱动）**
+   - 开启测试签名：`bcdedit /set testsigning on` 后重启。
+   - 或配置测试证书并对 `.sys`/`.cat` 做测试签名（见微软“Signing a Driver for Test”文档）。
+
+---
+
+## 构建
+
+```powershell
+# 用户态工具（无需 WDK，普通 cargo 即可；目标 x86_64-pc-windows-msvc）
+cargo build -p com0com-setupc --release
+
+# 内核驱动（需要 WDK/eWDK，由 cargo-wdk 驱动构建）
+cargo wdk build -p com0combus --release
+cargo wdk build -p com0comport --release
+```
+
+> 本机（无 WDK/MSVC）已用 GNU 目标的 `cargo check` 对 `setupc` 做了类型检查（已通过）；
+> 内核 crate 的链接与最终 `.sys` 必须在 eWDK 环境完成。
+
+---
+
+## 安装与在测试 VM 中运行
+
+1. 把 `.inx` 模板交给 WDK 处理成 `.inf`（WDK 的 `stampinf` / MSBuild 会写入版本与日期），
+   或直接按模板生成：
+   ```powershell
+   # 在 eWDK 构建后，通常已生成 com0combus.inf / com0comport.inf
+   ```
+
+2. 安装总线（根枚举设备），再让总线枚举出端口 PDO 时自动匹配端口 INF：
+   ```powershell
+   # 以管理员身份
+   devcon install com0combus.inf COM0COM\BUS
+   # 端口 INF 由系统在总线枚举 PDO（COM0COM\PORT_A/B）时自动匹配安装
+   ```
+   也可用 `pnputil /add-driver com0combus.inf /install`。
+
+3. 用 `setupc` 创建一对虚拟串口：
+   ```powershell
+   setupc add --port-a COM15 --port-b COM16
+   setupc list
+   ```
+   此时 `COM15` 与 `COM16` 即为一个 null-modem 对，可用任意串口工具互发数据。
+
+4. 删除：`setupc remove 0`。
+
+---
+
+## `setupc` 用法
+
+```
+setupc list
+setupc add   [--id N] [--port-a NAME] [--port-b NAME]
+             [--baud-emu] [--overrun] [--noise[=PROB]] [--exclusive] [--plugin]
+setupc remove <id>
+setupc params <id>
+setupc set   <id> [same flags as add, minus --id/--port-*]
+```
+
+- 省略 `--port-a/--port-b` 时由系统 COM 名称仲裁分配 `COMx`。
+- `--noise=PROB` 中的 `PROB` 为 0..10000（单位 0.01%，即 `PROB/100` 为百分比）。
+- 省略 `--id` 时自动选择最小可用 id（上限 64 对）。
+- 需要**管理员权限**运行（打开总线设备接口需要写访问）。
+
+`setupc` 的实现位置：`tools/setupc/src/main.rs`。它通过
+`GUID_COM0COM_BUS`（`com0com-common` 中的 `GUID_COM0COM_BUS_BYTES`）枚举总线设备接口，
+再用 `CreateFileW` 打开并发出 `IOCTL_COM0COM_CREATE_PAIR` / `DELETE_PAIR` / `ENUM_PAIRS` /
+`GET_PARAMS` / `SET_PARAMS`。
+
+---
+
+## 已实现 vs. 待办（P2 特性）
+
+**已实现**
+- 混合驱动骨架、PDO 枚举、兼容 ID、`PORT_LINK`/`PORT_UNLINK` 引用计数与回收；
+- 完整 `IOCTL_SERIAL_*`（波特率/线路控制/字符/超时/握手/modem 状态/等待事件/统计/中断/流控等）；
+- 两端口数据转发、挂起读与 `WAIT_ON_MASK` 的取消安全实现；
+- `setupc` 用户态配置工具；共享协议与结构体。
+
+**部分 stub / 待实现（参数已存储，数据路径尚未生效）**
+- `emu_br`（波特率时序仿真）：标志已存，但转发路径未做节流/时序模拟；
+- `emu_noise` / `emu_overrun`（噪声注入 / 溢出仿真）：标志已存，转发路径未注入；
+- `SET_QUEUE_SIZE`：当前为接受但无实际改大小的 no-op；
+- `SERIAL_XOFF_COUNTER`：当前为 no-op；
+- 基于注册表的持久化配置（对标 `HKLM\...\com0com\Parameters`）；
+- 网络扩展（远程串口对）。
+
+这些在原始需求中属于第二阶段特性，当前保留了接口与存储位，便于后续填充实现。
+
+---
+
+## 安全性与零拷贝立场
+
+本项目遵循“尽量少 unsafe、尽量零拷贝”的原则，分两层落实：
+
+- **`com0com-common`（共享库）**：100% 安全 Rust，零 `unsafe`、零多余拷贝。所有
+  `IOCTL_*` 控制码、协议结构体、`PairContext`/环缓冲都是纯 `const`/数据结构。
+- **`setupc`（用户态工具）**：业务命令逻辑（`cmd_*` / `main`）**零 `unsafe` 关键字**。
+  `unsafe` 全部收敛到极薄的 Win32 FFI 封装 helper（`bus_device_path` / `open_bus` /
+  `ioctl` / `struct_bytes` / `struct_of` / `close_bus` / `from_bytes`）。请求发送采用
+  **零拷贝**：直接把 `#[repr(C)]` 结构体以字节切片视图传给 `DeviceIoControl`，
+  不再 `memcpy` 进 `Vec`。返回数据的一次拷贝是 `METHOD_BUFFERED` IOCTL 的硬性要求
+  （内核写回的是裸字节，且结构体对齐可能高于 `u8` 缓冲），属于必要拷贝，无冗余。
+- **`com0combus` / `com0comport`（内核驱动）**：**无法做到零 unsafe**——调用
+  WDK/wdk-sys FFI、操作 `KSPIN_LOCK` / `PIRP` / 裸指针、挂起并取消 IRP 本质就是
+  `unsafe`。但所有 unsafe 同样收敛到小 helper（`read_in` / `write_out` / `lock` /
+  `unlock` / `read_struct` / `write_struct` / `raw_lock` / `raw_unlock` 等），
+  数据流上**只有一次必要的边界拷贝**，没有冗余拷贝。内核驱动的真正编译/加载仍须在
+  eWDK 环境完成（见下文“环境”）。
+
+## 已知风险 / 需在上机验证的点
+
+- `wdk-sys` 的符号名（`POOL_FLAG_NON_PAGED`、`WDF_CHILD_RETRIEVE_INFO` 字段、
+  `WdfChildList*` 绑定、`IoReleaseCancelSpinLock`、`KeWaitForSingleObject` 参数等）在源码中
+  以“按官方 WDK 文档拼写”的方式书写，需在真实 WDK 构建中逐项确认；如有差异以 WDK 头文件为准。
+- 内核 crate `Cargo.toml` 内含 `[profile.dev]/[profile.release] panic = "abort"`
+  （内核不支持 unwind）。在本工作区根构建时会收到“profile 被忽略”的告警——
+  这是 cargo 对工作区非根 profile 的常规提示；`cargo wdk build` 会正确处理 panic 策略。
+- 真实加载前，务必在**隔离的测试虚拟机**中开启测试签名，避免影响宿主机。
+
+---
+
+## 许可
+
+MIT OR Apache-2.0（与 `windows-drivers-rs` 生态一致）。

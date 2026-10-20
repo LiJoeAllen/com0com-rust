@@ -1,0 +1,36 @@
+;
+; com0combus.inx — KMDF bus driver for the Rust com0com rewrite.
+; Installs the bus service. The bus FDO enumerates the virtual port PDOs.
+; The root devnode "COM0COM\BUS" is created by the setup tool on first run
+; (see README: installation).
+;
+
+[Version]
+Signature   = "$Windows NT$"
+Class       = System
+ClassGuid   = {4D36E97D-E325-11CE-BFC1-08002BE10318}
+Provider    = %ManufacturerName%
+CatalogFile = com0combus.cat
+DriverVer   = 10/20/2026,0.1.0.0
+
+[DestinationDirs]
+DefaultDestDir = 12 ; %SystemRoot%\System32\drivers
+
+[Manufacturer]
+%ManufacturerName% = Com0comBus, NTamd64
+
+[Com0comBus.NTamd64]
+%BusDescription% = Com0comBus_Device, COM0COM\BUS
+
+[Com0comBus_Device.NTamd64.Services]
+AddService = com0combus, 0x00000002, Com0comBus_Service
+
+[Com0comBus_Service]
+ServiceType    = 1   ; SERVICE_KERNEL_DRIVER
+StartType      = 3   ; SERVICE_DEMAND_START
+ErrorControl   = 1   ; SERVICE_ERROR_NORMAL
+ServiceBinary  = %12%\com0combus.sys
+
+[Strings]
+ManufacturerName = "JoeAllen"
+BusDescription   = "com0com Bus (Rust)"

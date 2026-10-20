@@ -1,0 +1,29 @@
+[package]
+name = "com0combus"
+version = "0.1.0"
+edition = "2021"
+description = "KMDF bus driver for the Rust com0com rewrite. Enumerates virtual port PDOs and owns the shared per-pair state."
+
+[dependencies]
+com0com-common = { path = "../com0com-common" }
+wdk = "0.3"
+wdk-sys = "0.4"
+wdk-alloc = "0.3"
+wdk-panic = "0.3"
+
+[build-dependencies]
+wdk-build = "0.4"
+
+[lib]
+crate-type = ["cdylib"]
+
+[profile.dev]
+panic = "abort"
+[profile.release]
+panic = "abort"
+
+# KMDF v1.33 is the configuration published on crates.io.
+[package.metadata.wdk.driver-model]
+driver-type = "KMDF"
+kmdf-version-major = 1
+target-kmdf-version-minor = 33

@@ -1,0 +1,19 @@
+# Dependabot 机器人：自动保持依赖与 GitHub Actions 最新
+# 满足 OpenSSF Scorecard 的 Dependency-Update-Tool 检查。
+version: 2
+updates:
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 10
+    labels:
+      - "dependencies"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    labels:
+      - "dependencies"
+      - "github-actions"

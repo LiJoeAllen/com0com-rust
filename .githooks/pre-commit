@@ -1,0 +1,45 @@
+#!/bin/sh
+# ---------------------------------------------------------------------------
+# com0com-rust 项目规则（新增）：每次 git 提交前必须先 `cargo fmt`。
+#
+# 强制方式：git config core.hooksPath .githooks 已写入本地配置；
+# 若格式不合规，本钩子直接拒绝提交。修复：cargo fmt --all
+#
+# 对应 CI：.github/workflows/ci.yml 的 "fmt check" 步骤（cargo fmt --all -- --check）。
+#
+# 注意：本机默认工具链 nightly-x86_64-pc-windows-msvc 可能未安装 cargo 组件，
+#       因此自动回退到 stable 或 nightly-gnu 中第一个可用的。
+# ---------------------------------------------------------------------------
+set -e
+
+# 挑选一个可用的 cargo（默认 nightly-msvc 无 cargo 组件，需回退）。
+CARGO=""
+for c in "cargo" "cargo +stable" "cargo +nightly-x86_64-pc-windows-gnu"; do
+    # shellcheck disable=SC2086  # 词分割是预期行为："cargo +stable" 需拆成两个词
+    if $c --version >/dev/null 2>&1; then
+        CARGO="$c"
+        break
+    fi
+done
+
+if [ -z "$CARGO" ]; then
+    echo "[pre-commit] 警告：未找到可用 cargo/rustfmt，跳过 fmt 检查。" >&2
+    echo "[pre-commit] 请确认已安装 rustfmt：rustup component add rustfmt" >&2
+    exit 0
+fi
+
+echo "[pre-commit] $CARGO fmt --all -- --check"
+# shellcheck disable=SC2086  # 同上
+if ! $CARGO fmt --all -- --check; then
+    cat >&2 <<'EOF'
+
+[pre-commit] 格式检查失败：存在未格式化的 Rust 代码。
+
+项目规则：提交前必须格式化。
+请运行：  cargo fmt --all
+然后重新   git add -A && git commit
+
+EOF
+    exit 1
+fi
+echo "[pre-commit] fmt OK"
