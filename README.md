@@ -58,7 +58,9 @@ com0com-rust/
 
 > 工作区 `default-members` 被设为 `com0com-common` 与 `tools/setupc`，因此一条裸 `cargo build`
 > 只构建这两个可在无 WDK 机器上编译的包，避免去触碰需要 WDK 的内核 crate。
-> 构建内核驱动时显式指定包：`cargo wdk build -p com0combus` / `-p com0comport`。
+>
+> 两个内核驱动**不是**本工作区的成员，各自是独立的工作区根（见下文“构建”），
+> 因为它们声明的驱动模型不同（KMDF vs WDM），而 `wdk-build` 要求整张依赖图只有一种配置。
 
 ---
 
@@ -99,13 +101,21 @@ com0com-rust/
 # 用户态工具（无需 WDK，普通 cargo 即可；目标 x86_64-pc-windows-msvc）
 cargo build -p com0com-setupc --release
 
-# 内核驱动（需要 WDK/eWDK，由 cargo-wdk 驱动构建）
-cargo wdk build -p com0combus --release
-cargo wdk build -p com0comport --release
+# 内核驱动（需要 WDK/eWDK；各自是独立工作区根，必须用 --manifest-path 指定）
+cargo build --manifest-path crates/com0combus/Cargo.toml --release
+cargo build --manifest-path crates/com0comport/Cargo.toml --release
 ```
 
-> 本机（无 WDK/MSVC）已用 GNU 目标的 `cargo check` 对 `setupc` 做了类型检查（已通过）；
-> 内核 crate 的链接与最终 `.sys` 必须在 eWDK 环境完成。
+> **为什么不能用 `cargo build -p com0combus`**：`wdk-build` 会遍历整张 cargo-metadata
+> 依赖图并要求只有一种 WDK 驱动模型配置。`com0combus` 声明 KMDF 1.33、`com0comport`
+> 声明 WDM，二者同处一个工作区时**任何**构建都会在编译开始前就中止：
+> `multiple configurations of the WDK are detected ... { Kmdf(1,33), Wdm }`。
+> 拆成独立工作区后各自依赖图单一配置；顺带它们 Cargo.toml 里的 `[profile.*] panic = "abort"`
+> 也真正生效了（作为工作区根不会再被忽略而只报告警）。
+
+> 内核 crate 的编译与最终 `.sys` 必须在装有 **WDK** 的环境完成。仅装 Windows SDK 不够：
+> 缺 `Windows Kits\10\Include\<ver>\km`（内核头文件）时，`wdk-sys` 由 bindgen 生成的大量结构体
+> 会退化成不完整类型（size 为 1），进而爆出几十条 `E0080 size_of 溢出` 断言失败。
 
 ---
 
@@ -220,8 +230,8 @@ setupc set   <id> [same flags as add, minus --id/--port-*]
   `WdfChildList*` 绑定、`IoReleaseCancelSpinLock`、`KeWaitForSingleObject` 参数等）在源码中
   以“按官方 WDK 文档拼写”的方式书写，需在真实 WDK 构建中逐项确认；如有差异以 WDK 头文件为准。
 - 内核 crate `Cargo.toml` 内含 `[profile.dev]/[profile.release] panic = "abort"`
-  （内核不支持 unwind）。在本工作区根构建时会收到“profile 被忽略”的告警——
-  这是 cargo 对工作区非根 profile 的常规提示；`cargo wdk build` 会正确处理 panic 策略。
+  （内核不支持 unwind）。二者现已是独立工作区根，该 profile **会正常生效**，
+  不再出现“profile 被忽略”的告警。
 - 真实加载前，务必在**隔离的测试虚拟机**中开启测试签名，避免影响宿主机。
 
 ---
