@@ -17,8 +17,9 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          # .agent/skills/* 是通过 .gitmodules 管理的第三方技能仓库
-          submodules: recursive
+          # .agent/skills/* 是通过 .gitmodules 管理的第三方技能仓库，与
+          # fmt/clippy/test 无关；递归检出它们只会让 CI 在无关的上游仓库抖动时变红。
+          submodules: false
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -80,7 +81,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          submodules: recursive
+          # 同上：构建内核驱动只需要本仓库源码，不需要 .agent/skills 子模块。
+          submodules: false
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
       - name: cargo wdk build (com0combus + com0comport)
