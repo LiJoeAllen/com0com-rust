@@ -14,7 +14,7 @@ license = "MIT OR Apache-2.0"
 com0com-common = { path = "../../crates/com0com-common" }
 
 # Lightweight raw Win32 bindings (no build script, no MSVC dependency).
-windows-sys = { version = "0.52", features = [
+windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Storage_FileSystem",   # CreateFileW (also needs Win32_Security, below)
     "Win32_Security",             # required by CreateFileW's signature
