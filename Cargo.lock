@@ -182,6 +182,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "clap-cargo"
+version = "0.15.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d546f0e84ff2bfa4da1ce9b54be42285767ba39c688572ca32412a09a73851e5"
+dependencies = [
+ "anstyle",
+ "clap",
+]
+
+[[package]]
 name = "clap_builder"
 version = "4.6.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -236,7 +246,7 @@ dependencies = [
  "com0com-common",
  "wdk",
  "wdk-alloc",
- "wdk-build",
+ "wdk-build 0.5.1",
  "wdk-panic",
  "wdk-sys",
 ]
@@ -247,7 +257,7 @@ version = "0.1.0"
 dependencies = [
  "com0com-common",
  "wdk-alloc",
- "wdk-build",
+ "wdk-build 0.5.1",
  "wdk-panic",
  "wdk-sys",
 ]
@@ -728,7 +738,7 @@ dependencies = [
  "cfg-if",
  "tracing",
  "tracing-subscriber",
- "wdk-build",
+ "wdk-build 0.4.0",
  "wdk-sys",
 ]
 
@@ -740,7 +750,7 @@ checksum = "5c349e2078aba5359ea06d97ab5e85bfe178ac70a97407f54a1090165c732196"
 dependencies = [
  "tracing",
  "tracing-subscriber",
- "wdk-build",
+ "wdk-build 0.4.0",
  "wdk-sys",
 ]
 
@@ -756,8 +766,32 @@ dependencies = [
  "cargo_metadata",
  "cfg-if",
  "clap",
- "clap-cargo",
+ "clap-cargo 0.14.1",
  "paste",
+ "rustversion",
+ "semver",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tracing",
+ "windows",
+]
+
+[[package]]
+name = "wdk-build"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2c150122a579af759770b354064cd2994d29e97525d904f65ff1412ad5122766"
+dependencies = [
+ "anyhow",
+ "bindgen",
+ "camino",
+ "cargo_metadata",
+ "cfg-if",
+ "clap",
+ "clap-cargo 0.15.2",
+ "paste",
+ "regex",
  "rustversion",
  "semver",
  "serde",
@@ -806,7 +840,7 @@ dependencies = [
  "thiserror",
  "tracing",
  "tracing-subscriber",
- "wdk-build",
+ "wdk-build 0.4.0",
  "wdk-macros",
 ]
 
