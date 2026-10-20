@@ -19,6 +19,7 @@
     path = .agent/skills/rust-skills
     url = https://github.com/leonardomso/rust-skills.git
     branch = master
+    shallow = true
 
 # 2) Anthropic 官方技能仓库：skill-creator、docx/pdf/xlsx/pptx 文档技能、
 #    mcp-builder、webapp-testing 等。用于文档产出与技能自身的开发。
@@ -26,6 +27,7 @@
     path = .agent/skills/anthropic-skills
     url = https://github.com/anthropics/skills.git
     branch = main
+    shallow = true
 
 # 3) Superpowers：TDD、systematic-debugging、writing-plans、requesting/receiving
 #    code-review、verification-before-completion、git worktrees 等工程化技能，
@@ -34,6 +36,7 @@
     path = .agent/skills/superpowers
     url = https://github.com/obra/superpowers.git
     branch = main
+    shallow = true
 
 # 4) Rust Agentic Skills：含 "Rust Kernel"、"Lint Hunter" 等技能，
 #    对内核态 Rust（unsafe/KSPIN_LOCK/IRQL/IRP）经验可直接借鉴。
@@ -41,6 +44,7 @@
     path = .agent/skills/rust-agentic-skills
     url = https://github.com/bapuqln/rust-agentic-skills.git
     branch = main
+    shallow = true
 
 # ---- 第二批：Git 工作流与 Claude 生态技能（用户 2026-10-20 追加）----
 
@@ -49,41 +53,47 @@
     path = .agent/skills/use-git
     url = https://github.com/changjian-k2k/use-git.git
     branch = main
+    shallow = true
 
 # Git 工作流最佳实践（分支策略、提交规范、code review）。
 [submodule ".agent/skills/git-workflow-skill"]
     path = .agent/skills/git-workflow-skill
     url = https://github.com/netresearch/git-workflow-skill.git
     branch = main
+    shallow = true
 
 # claude-mods：专家技能/agents/commands/rules/hooks 集合。
 [submodule ".agent/skills/claude-mods"]
     path = .agent/skills/claude-mods
     url = https://github.com/0xDarkMatter/claude-mods.git
     branch = main
+    shallow = true
 
 # claude-code-kit：精选 agents/skills/settings 工具包。
 [submodule ".agent/skills/claude-code-kit"]
     path = .agent/skills/claude-code-kit
     url = https://github.com/tassiovale/claude-code-kit.git
     branch = main
+    shallow = true
 
 # aiskillstore/marketplace：安全审计过的技能市场。
-# 仓库约 1GB，使用 shallow 克隆（--depth 1）控制体积。
-[submodule ".agent/skills/aiskillstore-marketplace"]
-    path = .agent/skills/aiskillstore-marketplace
-    url = https://github.com/aiskillstore/marketplace.git
-    branch = main
-    shallow = true
+# 仓库约 1GB，使用 shallow 克隆（--depth 1）控制体积。 暂时注释（太大，暂不纳入）
+# [submodule ".agent/skills/aiskillstore-marketplace"]
+#     path = .agent/skills/aiskillstore-marketplace
+#     url = https://github.com/aiskillstore/marketplace.git
+#     branch = main
+#     shallow = true
 
 # mir-am：AI 编码助手的 Agents & Skills。
 [submodule ".agent/skills/skills-agents-ai-coding"]
     path = .agent/skills/skills-agents-ai-coding
     url = https://github.com/mir-am/skills-agents-ai-coding.git
     branch = main
+    shallow = true
 
 # 九个可独立安装的 Git 工作流与分支治理 Agent Skills。
 [submodule ".agent/skills/git-skills"]
     path = .agent/skills/git-skills
     url = https://github.com/full-stack-skills/git-skills.git
     branch = main
+    shallow = true
