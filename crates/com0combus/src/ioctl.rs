@@ -7,7 +7,8 @@
 use core::ptr;
 
 use wdk_sys::{
-    c_void, call_unsafe_wdf_function_binding, nt_success, NTSTATUS, WDFQUEUE, WDFREQUEST,
+    c_void, call_unsafe_wdf_function_binding, nt_success, KSPIN_LOCK, NTSTATUS, WDFQUEUE,
+    WDFREQUEST,
 };
 
 use crate::bus::{
@@ -16,6 +17,7 @@ use crate::bus::{
 };
 use com0com_common::{
     ioctls,
+    pair::PairContext,
     protocol::{
         CreatePairRequest, DeletePairRequest, EnumPairsResponse, GetParamsRequest, PortLinkRequest,
         PortLinkResponse, PortUnlinkRequest, SetParamsRequest,
@@ -122,6 +124,11 @@ unsafe fn create_pair(request: WDFREQUEST) -> (NTSTATUS, usize) {
     (*slot).params = req.params;
     (*slot).child_present = [false, false];
     (*slot).ref_count = 0;
+    // Mirror the params into the shared PairContext: the *port* driver never
+    // sees the bus slot, so this is the only channel through which `emu_br` /
+    // `emu_noise` / `emu_overrun` / `noise_probability` reach the data path.
+    // Done while `state.lock` is held and before the PDOs are enumerated.
+    (*pair_va).params = req.params;
     state.slots[idx] = slot;
     raw_unlock(&mut state.lock as *mut _, irql);
 
@@ -269,6 +276,25 @@ unsafe fn set_params(request: WDFREQUEST) -> (NTSTATUS, usize) {
         }
     };
     (*slot).params = req.params;
+    // Keep the shared PairContext (and therefore both port drivers) in sync.
+    // The pair VA is stable for the lifetime of the slot, and the slot cannot
+    // be freed while we hold `state.lock`.
+    //
+    // The write itself must hold the *pair* lock: the port driver reads
+    // `(*pc).params` under that same lock (com0comport::readwrite::handle_write),
+    // and `Com0comPairParams` is 160 bytes — without the lock a port can observe
+    // a torn update (e.g. emu_noise == 1 with a stale noise_probability == 0).
+    // Lock order is bus -> pair everywhere; the port driver never takes the bus
+    // lock, so this cannot deadlock.
+    let pair_va = (*slot).pair_va as *mut PairContext;
+    if !pair_va.is_null() {
+        let pair_irql = raw_lock(&mut (*pair_va).lock as *mut u64 as *mut KSPIN_LOCK);
+        (*pair_va).params = req.params;
+        raw_unlock(
+            &mut (*pair_va).lock as *mut u64 as *mut KSPIN_LOCK,
+            pair_irql,
+        );
+    }
     raw_unlock(&mut state.lock as *mut _, irql);
     (wdk_sys::STATUS_SUCCESS, 0)
 }

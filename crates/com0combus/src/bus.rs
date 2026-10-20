@@ -9,7 +9,7 @@ use wdk_sys::{
 
 use com0com_common::{
     constants::{GUID_COM0COM_BUS_BYTES, GUID_DEVINTERFACE_COMPORT},
-    pair::PairContext,
+    pair::{PairContext, PortState},
     protocol::Com0comPairParams,
 };
 
@@ -121,6 +121,14 @@ pub unsafe fn alloc_pair_context(pair_id: u32) -> *mut PairContext {
     pc.magic = com0com_common::pair::COM0COM_MAGIC;
     pc.pair_id = pair_id;
     pc.ref_count = 0;
+    pc.deleting = 0;
+    pc.params = Com0comPairParams::new();
+    // Start both ports from the canonical defaults instead of raw zeros: a
+    // zeroed `PortState` has `rx_buffer_size` / `tx_buffer_size` / `queue_limit`
+    // == 0 (the write path would then accept *no* bytes) and `rng_state` == 0
+    // (xorshift32 degenerates to an all-zero stream).
+    pc.port[0] = PortState::new();
+    pc.port[1] = PortState::new();
     KeInitializeSpinLock(&mut pc.lock as *mut u64 as *mut KSPIN_LOCK);
     ptr as *mut PairContext
 }

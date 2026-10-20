@@ -26,6 +26,23 @@ pub struct Com0comPairParams {
     pub pin_wiring: [[u8; 4]; 2],
 }
 
+impl Com0comPairParams {
+    /// Const constructor. The derived `Default` is not a `const fn`, so this is
+    /// what `PairContext::new` (a `const fn`) uses to zero the field.
+    pub const fn new() -> Self {
+        Com0comPairParams {
+            port_name: [[0u16; PAIR_PARAMS_NAME_LEN]; 2],
+            emu_br: 0,
+            emu_overrun: 0,
+            emu_noise: 0,
+            noise_probability: 0,
+            exclusive_mode: 0,
+            plugin_mode: 0,
+            pin_wiring: [[0u8; 4]; 2],
+        }
+    }
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct CreatePairRequest {
@@ -170,6 +187,30 @@ mod tests {
         assert_eq!(offset_of!(PortUnlinkRequest, pair_id), 0);
         assert_eq!(offset_of!(PortUnlinkRequest, port_index), 4);
         assert_eq!(offset_of!(PortUnlinkRequest, pair_va), 8);
+    }
+
+    // `PairContext::new()` is a `const fn` and therefore cannot call the
+    // derived `Default`; `Com0comPairParams::new()` must produce the exact same
+    // all-zero layout.
+    #[test]
+    fn pair_params_const_new_matches_default() {
+        let a = Com0comPairParams::new();
+        let b = Com0comPairParams::default();
+        assert_eq!(a.port_name, b.port_name);
+        assert_eq!(a.emu_br, b.emu_br);
+        assert_eq!(a.emu_overrun, b.emu_overrun);
+        assert_eq!(a.emu_noise, b.emu_noise);
+        assert_eq!(a.noise_probability, b.noise_probability);
+        assert_eq!(a.exclusive_mode, b.exclusive_mode);
+        assert_eq!(a.plugin_mode, b.plugin_mode);
+        assert_eq!(a.pin_wiring, b.pin_wiring);
+        // Everything is zeroed, which is what the bus writes on CREATE_PAIR
+        // when `setupc` passes no emu_* flags.
+        assert_eq!(a.emu_br, 0);
+        assert_eq!(a.emu_noise, 0);
+        assert_eq!(a.emu_overrun, 0);
+        assert_eq!(a.noise_probability, 0);
+        assert_eq!(a.pin_wiring, [[0u8; 4]; 2]);
     }
 
     #[test]

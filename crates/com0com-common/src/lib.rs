@@ -14,6 +14,7 @@
 #![allow(non_snake_case)]
 
 pub mod constants;
+pub mod emulation;
 pub mod guid;
 pub mod ioctls;
 pub mod naming;

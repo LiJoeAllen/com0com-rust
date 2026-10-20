@@ -165,17 +165,30 @@ setupc set   <id> [same flags as add, minus --id/--port-*]
 - 混合驱动骨架、PDO 枚举、兼容 ID、`PORT_LINK`/`PORT_UNLINK` 引用计数与回收；
 - 完整 `IOCTL_SERIAL_*`（波特率/线路控制/字符/超时/握手/modem 状态/等待事件/统计/中断/流控等）；
 - 两端口数据转发、挂起读与 `WAIT_ON_MASK` 的取消安全实现；
-- `setupc` 用户态配置工具；共享协议与结构体。
+- `setupc` 用户态配置工具；共享协议与结构体；
+- `emu_br`（波特率时序仿真）：按 `baud` + 帧格式（半比特精确计数，支持 1.5 停止位）给写路径发放字节预算；
+  **实现方式**：写侧短写限速（`Information` = 本次实际投递字节数），**无 staging 缓冲、无定时器/DPC**；
+  读侧不限速。已知边界：调用方需重试短写；高频小写入靠 Q16 定点 carry 累积，不会饿死。
+- `emu_noise`（噪声注入）：按 `noise_probability`（0..10000，单位 0.01%）逐字节翻转一个随机位，
+  使用确定性 `Xorshift32`（种子存在 `PortState.rng_state`，可复现）；**实现方式**：256 字节栈上分块
+  （不在内核栈开 16KB），破坏计数落到 `noise_count` / `FrameErrorCount` / `ParityErrorCount`。
+  已知边界：同一“写”只把帧/奇偶错误计数各 +1，不是逐字节计数。
+- `emu_overrun`（溢出仿真）：写侧被对端队列上限截断时，把差额计入对端
+  `SerialOverrunErrorCount` / `BufferOverrunErrorCount` 并置 `SERIAL_EV_ERR`；
+  未开启该标志时的截断只是正常流控，不计错误。
+- `IOCTL_SERIAL_SET_QUEUE_SIZE`：真正生效——`InSize`/`OutSize` 经 `clamp_queue_size` 夹到
+  `[1, RING_BUFFER_SIZE-1]`，并写入 `rx_buffer_size`/`tx_buffer_size`/`queue_limit`；
+  写路径用 `queue_limit` 作为环缓冲上限（`RingBuffer::write_capped`），`GET_PROPERTIES`
+  的 `MaxTxQueue`/`MaxRxQueue`/`Current*Queue` 也随之反映。已知边界：环缓冲物理大小不变，
+  缩小队列不会释放内存。
+- `IOCTL_SERIAL_XOFF_COUNTER`：真正生效——按 `XoffState` 语义限制本次可投递字节数，
+  计数耗尽即 halt，直到 `SET_XON`/`PURGE` 清除；`SET_XOFF` 为立即 halt。
+- 挂起 IRP 正确性：返回 `STATUS_PENDING` 前调用 `IoMarkIrpPending`，且在**取消自旋锁**下
+  安装 cancel routine 并复查 `Irp->Cancel`（消除“已取消但未回调 → IRP 泄漏”竞态）。
 
-**部分 stub / 待实现（参数已存储，数据路径尚未生效）**
-- `emu_br`（波特率时序仿真）：标志已存，但转发路径未做节流/时序模拟；
-- `emu_noise` / `emu_overrun`（噪声注入 / 溢出仿真）：标志已存，转发路径未注入；
-- `SET_QUEUE_SIZE`：当前为接受但无实际改大小的 no-op；
-- `SERIAL_XOFF_COUNTER`：当前为 no-op；
+**待实现**
 - 基于注册表的持久化配置（对标 `HKLM\...\com0com\Parameters`）；
 - 网络扩展（远程串口对）。
-
-这些在原始需求中属于第二阶段特性，当前保留了接口与存储位，便于后续填充实现。
 
 ---
 
@@ -200,6 +213,9 @@ setupc set   <id> [same flags as add, minus --id/--port-*]
 
 ## 已知风险 / 需在上机验证的点
 
+- 本次新增的 WDK 符号需在 eWDK 中确认签名/导出：`IoMarkIrpPending`、
+  `IoAcquireCancelSpinLock`、`IoReleaseCancelSpinLock`、`KeQueryInterruptTime`
+  （源码中均以 `// VERIFY(eWDK): <符号名>` 标注）。
 - `wdk-sys` 的符号名（`POOL_FLAG_NON_PAGED`、`WDF_CHILD_RETRIEVE_INFO` 字段、
   `WdfChildList*` 绑定、`IoReleaseCancelSpinLock`、`KeWaitForSingleObject` 参数等）在源码中
   以“按官方 WDK 文档拼写”的方式书写，需在真实 WDK 构建中逐项确认；如有差异以 WDK 头文件为准。
