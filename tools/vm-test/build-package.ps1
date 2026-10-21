@@ -95,6 +95,23 @@ function Copy-DriverPackage([string]$source, [string]$destination) {
 Step "构建配置: $Configuration（CARGO_BUILD_JOBS=$Jobs）"
 $env:CARGO_BUILD_JOBS = "$Jobs"
 
+# Git Bash/MSYS 环境的 PATH 里常带有同名的第三方 signtool（如 msys64\mingw64\bin），
+# 会遮蔽 WDK/SDK 的 signtool 并让 cargo-wdk 签名失败。注意 signtool 只随 Windows SDK
+# 的版本化 bin 目录发布（WDK 自身的 bin\<ver> 不含它），所以要选**含有 signtool.exe**
+# 的最新版本目录前置。
+if ($env:WDKContentRoot) {
+    $versionedBins = Get-ChildItem -Path (Join-Path $env:WDKContentRoot 'bin') -Directory -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -match '^\d+(\.\d+)+' } |
+        Sort-Object { [version]$_.Name } -Descending
+    foreach ($bin in $versionedBins) {
+        $dir = Join-Path $bin.FullName 'x64'
+        if ((Test-Path $dir) -and (Test-Path (Join-Path $dir 'signtool.exe'))) {
+            $env:PATH = "$dir;$env:PATH"
+            break
+        }
+    }
+}
+
 if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
     throw '找不到 cargo，请先安装 Rust 工具链。'
 }
