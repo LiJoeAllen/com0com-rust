@@ -22,3 +22,5 @@ target/
 
 # 本机私密环境（口令、本机路径）——模板 .env 入库，实际值放 .env.local
 .env.local
+/.v2c/
+/.video_agent/
