@@ -10,8 +10,11 @@
 - 用户态配置工具 `setupc`（对标原版 `setupc`/`setupg`）。
 
 > ⚠️ **状态**：核心架构、两套驱动源码、共享协议、`setupc` 均已完成。
-> 两套内核驱动已在 **WDK 10.0.28000 + wdk-sys 0.4.0** 环境下**真实编译通过**
-> （2026-10-21 以 debug 构建验证；产物尚未在测试虚拟机中加载）。
+> 两套内核驱动已在 **WDK 10.0.28000 + wdk-sys 0.4.0** 环境下编译通过，并已于
+> 2026-10-21 在 **Windows 11 24H2 测试虚拟机**中完成加载与端到端验证：
+> `setupc add/remove/list`、COM15/COM16 双向 4096 字节传输、自动命名，以及删除后
+> 端口/PHANTOM/`SERIALCOMM` 清理均通过。验证流程已固化在
+> [`tools/vm-test/`](tools/vm-test/README.md)。
 > 没有 WDK 的机器仍只能构建 `com0com-common` 与 `setupc` 两个纯用户态/无 std 的包。
 
 ---
@@ -30,7 +33,7 @@
 **关键设计点**
 
 - 总线为每对分配一个 `PairContext`（含两个 `PortState` 与一把 `KSPIN_LOCK`），放在非分页池；端口驱动通过 `PORT_LINK` 取得内核 VA 并引用计数，两块驱动在同一内核地址空间，裸指针共享有效。
-- 串口对由**兼容 ID** 编码：`c0c0_<pair_id_hex8>_<A|B>`，端口驱动据此恢复 `pair_id`/`port_index`，而不影响 INF 的硬件 ID 匹配。
+- 串口对由**兼容 ID** 编码：`c0c0_<pair_id_hex8><A|B>`（如 `c0c0_00000005A`），端口驱动据此恢复 `pair_id`/`port_index`，而不影响 INF 的硬件 ID 匹配。
 - COM 命名：`\DosDevices\COMx` 符号链接 + `GUID_DEVINTERFACE_COMPORT` 设备接口注册，Win32 应用可直接 `CreateFile("COMx")`。
 - 跨驱动共享状态、取消安全的挂起 IRP（read / `WAIT_ON_MASK`）均由 `PairContext` 的自旋锁保护。
 
@@ -52,9 +55,14 @@ com0com-rust/
 │       ├── com0comport.inx    # 端口 INF 模板
 │       └── Makefile.toml
 └── tools/
-    └── setupc/                # 用户态配置工具（com0com-setupc）
-        ├── Cargo.toml
-        └── src/main.rs
+    ├── setupc/                # 用户态配置工具（com0com-setupc）
+    │   ├── Cargo.toml
+    │   └── src/main.rs
+    └── vm-test/               # 隔离 VM 的构建/安装/端到端验证脚本
+        ├── README.md
+        ├── build-package.ps1
+        ├── run-vm-test.ps1
+        └── guest/             # 在客户机内执行的安装与检查脚本
 ```
 
 > 工作区 `default-members` 被设为 `com0com-common` 与 `tools/setupc`，因此一条裸 `cargo build`
@@ -141,6 +149,19 @@ cargo build --manifest-path crates/com0comport/Cargo.toml --release
 
 ## 安装与在测试 VM 中运行
 
+推荐使用已固化的自动化流程（构建 → 快照回滚 → 安装 → 双向传输验证 → 收集日志）：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools\vm-test\build-package.ps1
+powershell -ExecutionPolicy Bypass -File tools\vm-test\run-vm-test.ps1 `
+  -VmxPath 'F:\VMs\com0com-test\com0com-test.vmx' `
+  -GuestUser '<客户机用户名>' -GuestPassword '<客户机密码>' `
+  -SnapshotName clean
+```
+
+前置条件、参数与排查见 [`tools/vm-test/README.md`](tools/vm-test/README.md)。
+手工安装步骤如下。
+
 1. 把 `.inx` 模板交给 WDK 处理成 `.inf`（WDK 的 `stampinf` / MSBuild 会写入版本与日期），
    或直接按模板生成：
    ```powershell
@@ -181,6 +202,8 @@ setupc set   <id> [same flags as add, minus --id/--port-*]
 - `--noise=PROB` 中的 `PROB` 为 0..10000（单位 0.01%，即 `PROB/100` 为百分比）。
 - 省略 `--id` 时自动选择最小可用 id（上限 64 对）。
 - 需要**管理员权限**运行（打开总线设备接口需要写访问）。
+- 排查问题时设置环境变量 `COM0COM_TRACE=1`，`setupc` 会把设备路径与每次 IOCTL 调用
+  以 `[setupc]` 前缀写到 stderr，不影响正常输出。
 
 `setupc` 的实现位置：`tools/setupc/src/main.rs`。它通过
 `GUID_COM0COM_BUS`（`com0com-common` 中的 `GUID_COM0COM_BUS_BYTES`）枚举总线设备接口，
@@ -238,16 +261,19 @@ setupc set   <id> [same flags as add, minus --id/--port-*]
   WDK/wdk-sys FFI、操作 `KSPIN_LOCK` / `PIRP` / 裸指针、挂起并取消 IRP 本质就是
   `unsafe`。但所有 unsafe 同样收敛到小 helper（`read_in` / `write_out` / `lock` /
   `unlock` / `read_struct` / `write_struct` / `raw_lock` / `raw_unlock` 等），
-  数据流上**只有一次必要的边界拷贝**，没有冗余拷贝。内核驱动现已在 WDK 环境编译通过，
-  加载运行仍须在测试虚拟机验证（见下文“环境”“已知风险”）。
+  数据流上**只有一次必要的边界拷贝**，没有冗余拷贝。内核驱动已在 WDK 环境编译通过，
+  并在隔离测试虚拟机中完成加载与端到端验证（见 [`tools/vm-test/`](tools/vm-test/README.md)）。
 
 ## 已知风险 / 需在上机验证的点
 
 - **编译已验证**（2026-10-21）：`com0comport`（WDM）与 `com0combus`（KMDF 1.33）均基于
-  WDK 10.0.28000 + `wdk-sys` 0.4.0 编译通过，原先“符号名/签名待确认”的风险项已关闭。
-  注意普通 `cargo build` 产出的是 `.dll`（`cargo wdk build` 才会生成并改名 `.sys`），
-  这只证明编译通过，**不代表可直接加载**。
-- **尚未在测试虚拟机加载/运行**：PDO 枚举、COM 符号链接、`setupc` 端到端流程均待真机验证。
+  WDK 10.0.28000 + `wdk-sys` 0.4.0 编译通过。普通 `cargo build` 产出的是 `.dll`
+  （`cargo wdk build` 才会生成并改名 `.sys`）。
+- **已在测试虚拟机验证**（2026-10-21）：两套驱动在 Windows 11 24H2（testsigning）中加载运行；
+  `setupc add/remove/list`、双向数据传输、自动命名、删除后的设备/`SERIALCOMM` 清理均通过。
+  复现见 [`tools/vm-test/`](tools/vm-test/README.md)。
+- 验证环境为 VMware + Win11 24H2 评估版；KMDF 1.33 要求 **Win11 24H2 / Server 2025 或更高**。
+- 配置持久化尚未实现：重启后串口对不会保留，需要重新 `setupc add`。
 - 内核 crate `Cargo.toml` 内含 `[profile.dev]/[profile.release] panic = "abort"`
   （内核不支持 unwind）。二者现已是独立工作区根，该 profile **会正常生效**，
   不再出现“profile 被忽略”的告警。
