@@ -19,15 +19,25 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 
-[dependencies]
+# Single source of truth for this workspace. The wdk* versions must match
+# crates/com0comport/Cargo.toml (the two drivers are separate roots).
+[workspace.dependencies]
 com0com-common = { path = "../com0com-common" }
 wdk = "0.3"
 wdk-sys = "0.4"
 wdk-alloc = "0.3"
 wdk-panic = "0.4"
+wdk-build = "0.5"
+
+[dependencies]
+com0com-common = { workspace = true }
+wdk = { workspace = true }
+wdk-sys = { workspace = true }
+wdk-alloc = { workspace = true }
+wdk-panic = { workspace = true }
 
 [build-dependencies]
-wdk-build = "0.5"
+wdk-build = { workspace = true }
 
 [lib]
 crate-type = ["cdylib"]

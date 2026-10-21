@@ -11,17 +11,12 @@ description = "User-mode configuration tool for the Rust com0com virtual null-mo
 # defined in `com0com-common`.
 
 [dependencies]
-com0com-common = { path = "../../crates/com0com-common" }
+com0com-common = { workspace = true }
 
 # Lightweight raw Win32 bindings (no build script, no MSVC dependency).
-# 0.61 起句柄类型为不透明指针（HANDLE/HWND = *mut c_void），用法见 src/main.rs。
-windows-sys = { version = "0.61", features = [
-    "Win32_Foundation",
-    "Win32_Storage_FileSystem",   # CreateFileW (also needs Win32_Security, below)
-    "Win32_Security",             # required by CreateFileW's signature
-    "Win32_System_IO",            # DeviceIoControl, OVERLAPPED
-    "Win32_Devices_DeviceAndDriverInstallation",
-] }
+# Version/features live in the workspace manifest; 0.61 起句柄类型为不透明指针
+# （HANDLE/HWND = *mut c_void），用法见 src/main.rs。
+windows-sys = { workspace = true }
 
 [[bin]]
 name = "setupc"
