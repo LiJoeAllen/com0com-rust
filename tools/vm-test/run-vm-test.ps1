@@ -47,6 +47,20 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+
+# 未显式传参时回落到环境变量（可用 tools/load-env.ps1 从 .env / .env.local 加载）。
+if (-not $VmxPath        -and $env:VMRUN_VMX_PATH)        { $VmxPath        = $env:VMRUN_VMX_PATH }
+if (-not $GuestUser      -and $env:VMRUN_GUEST_USER)      { $GuestUser      = $env:VMRUN_GUEST_USER }
+if (-not $GuestPassword  -and $env:VMRUN_GUEST_PASSWORD)  { $GuestPassword  = $env:VMRUN_GUEST_PASSWORD }
+if (-not $SnapshotName   -and $env:VMRUN_SNAPSHOT_NAME)   { $SnapshotName   = $env:VMRUN_SNAPSHOT_NAME }
+if (-not $VmrunPath      -and $env:VMRUN_PATH)            { $VmrunPath      = $env:VMRUN_PATH }
+if (-not $PackageDir     -and $env:VM_TEST_PACKAGE_DIR)   { $PackageDir     = $env:VM_TEST_PACKAGE_DIR }
+if (-not $ResultsDir     -and $env:VM_TEST_RESULTS_DIR)   { $ResultsDir     = $env:VM_TEST_RESULTS_DIR }
+# Jobs/Configuration 始终有非空默认值，只在环境未改过默认值时采用环境变量。
+if ($Jobs -eq 2          -and $env:VM_TEST_JOBS)          { $Jobs           = [int]$env:VM_TEST_JOBS }
+$vmTestConfiguration = $env:VM_TEST_CONFIGURATION
+if ($PSBoundParameters.ContainsKey('Configuration')) { $vmTestConfiguration = $Configuration }
+if ($vmTestConfiguration) { $Configuration = $vmTestConfiguration }
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $GuestPowerShell = 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe'
 

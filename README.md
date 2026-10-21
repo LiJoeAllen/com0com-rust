@@ -10,8 +10,9 @@
 - 用户态配置工具 `setupc`（对标原版 `setupc`/`setupg`）。
 
 > ⚠️ **状态**：核心架构、两套驱动源码、共享协议、`setupc` 均已完成。
-> 两套内核驱动已在 **WDK 10.0.28000 + wdk-sys 0.4.0** 环境下编译通过，并已于
-> 2026-10-21 在 **Windows 11 24H2 测试虚拟机**中完成加载与端到端验证：
+> 两套内核驱动已在 **WDK 10.0.28000 + wdk-sys 0.5.1** 环境下编译通过；同一套源码
+> 已于 2026-10-21 在 **Windows 11 24H2 测试虚拟机**中完成加载与端到端验证（当时构建
+> 基于 wdk-sys 0.4.0）：
 > `setupc add/remove/list`、COM15/COM16 双向 4096 字节传输、自动命名，以及删除后
 > 端口/PHANTOM/`SERIALCOMM` 清理均通过。验证流程已固化在
 > [`tools/vm-test/`](tools/vm-test/README.md)。
@@ -75,6 +76,48 @@ com0com-rust/
 > 第三方依赖版本只在根 `Cargo.toml` 的 `[workspace.dependencies]` 中维护。两个驱动根
 > 无法继承该表，只能重复声明；`tools/check-deps.ps1` 会在 pre-commit 与 CI 中强制三者
 > 完全一致，并禁止包内依赖直接写版本号。
+>
+> `windows-sys` 直接依赖 GitHub `microsoft/windows-rs` 的 tag `74`（版本 0.100.0）：
+> crates.io 上仍停留在 0.61.2。0.100 的模块路径与 feature 名已改为小写头文件名
+> （`Win32::setupapi`、feature `setupapi` 等），`tools/setupc` 已按新布局迁移。
+
+---
+
+## 环境清单（`.env`，新机器先看这里）
+
+仓库根的 `.env` 是团队共享模板，列出了构建与虚拟机测试所需的**全部**可配置项。
+clone 之后只需三步：
+
+```powershell
+cp .env .env.local        # 1. 复制一份本机配置
+# 2. 编辑 .env.local：填自己的 WDK 路径、虚拟机 .vmx、客户机账号口令等
+. tools/load-env.ps1      # 3. 加载（必须 dot-source）
+```
+
+```bash
+# Git Bash 等价写法
+cp .env .env.local
+source tools/load-env.sh  # 必须 source
+```
+
+| 变量 | 用途 |
+|------|------|
+| `WDKContentRoot` | WDK 内容根目录（须含 `Include\<ver>\km` 与 `Lib\wdf\kmdf`）；留空自动探测 |
+| `CARGO_BUILD_JOBS` | cargo 并行度，默认 2——内核 crate 首次 bindgen 极吃 CPU，别调太高 |
+| `LIBCLANG_PATH` | **必须是 libclang 18（18.1.1 已验证）**。22.1.x 有 bindgen 回归，会让 `wdk-sys` 编译爆成片 `E0080` |
+| `BINDGEN_EXTRA_CLANG_ARGS` | 给 bindgen 补 SDK 的 `shared/ucrt/um` 头文件路径（WDK 自带 Include 里没有）；路径不能含空格 |
+| `VMRUN_VMX_PATH` / `VMRUN_GUEST_USER` / `VMRUN_GUEST_PASSWORD` | 虚拟机端到端测试目标 |
+| `VMRUN_PATH` / `VMRUN_SNAPSHOT_NAME` / `VM_TEST_CONFIGURATION` / `VM_TEST_JOBS` | 同上，可选 |
+
+规则：
+- **`.env` 入库，只放占位值**，禁止写真实口令；本机私密值一律写 **`.env.local`**（已 gitignore）
+- 优先级：命令行显式传参 → `.env.local` → 已有环境变量 → `.env` → 脚本默认值
+  （`.env.local` 刻意能压过机器上遗留的环境变量——例如系统装的 libclang 22）
+- 核对实际生效值：`bash tools/load-env.sh --print` 或 `pwsh -File tools/load-env.ps1 -Print`
+
+> **为什么是三个 workspace**：`com0combus`（KMDF）与 `com0comport`（WDM）驱动模型不同，
+> 而 `wdk-build` 要求单张依赖图只有一种配置，同处一个 workspace 会让**任何**构建中止。
+> 二者因此各自成为独立 workspace 根，它们的依赖版本靠 `tools/check-deps.ps1` 强制与根一致。
 
 ---
 
@@ -272,7 +315,7 @@ setupc set   <id> [same flags as add, minus --id/--port-*]
 ## 已知风险 / 需在上机验证的点
 
 - **编译已验证**（2026-10-21）：`com0comport`（WDM）与 `com0combus`（KMDF 1.33）均基于
-  WDK 10.0.28000 + `wdk-sys` 0.4.0 编译通过。普通 `cargo build` 产出的是 `.dll`
+  WDK 10.0.28000 + `wdk-sys` 0.5.1 编译通过。普通 `cargo build` 产出的是 `.dll`
   （`cargo wdk build` 才会生成并改名 `.sys`）。
 - **已在测试虚拟机验证**（2026-10-21）：两套驱动在 Windows 11 24H2（testsigning）中加载运行；
   `setupc add/remove/list`、双向数据传输、自动命名、删除后的设备/`SERIALCOMM` 清理均通过。

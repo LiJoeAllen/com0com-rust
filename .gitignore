@@ -19,3 +19,6 @@ target/
 
 # 本地 Agent 记忆（.agent/memory，不入版本库；.agent/knowledge 与 .agent/skills 需入库）
 .agent/memory/
+
+# 本机私密环境（口令、本机路径）——模板 .env 入库，实际值放 .env.local
+.env.local

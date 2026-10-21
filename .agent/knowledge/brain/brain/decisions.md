@@ -24,3 +24,24 @@ created: 2026-10-20
 - 决策：技能与文档体系放在仓库根 `.agent/`（工具无关）。
 - 理由：可被多种 AI 编码助手复用，不锁定 WorkBuddy。
 - 后果：OpenSpec/PBH 原生 CLI 默认找仓库根 `openspec/`、`docs/`；本体系放在 `.agent/knowledge/` 下，需要时用软链或移动。
+
+---
+type: decision
+status: accepted
+created: 2026-10-21
+---
+
+# 决策：工具链与环境入口统一到 `.env` + 加载器
+
+- 上下文：本机路径（WDK 根目录、VMware `.vmx`、`vmrun.exe`）与凭据（客户机账号口令）
+  散落在命令行参数里，换机器就要重新拼一遍；同时内核 crate 首次构建需 bindgen 解析整套
+  WDK 头文件，曾在 16 核机器上把 CPU 打满到用户被迫重启。
+- 决策：仓库根的 `.env` 作为团队共享模板（占位值，入库），`.env.local` 放本机私密值
+  （gitignore，最后加载并覆盖），配套 `tools/load-env.ps1` 与 `tools/load-env.sh`
+  两套语义一致的加载器；脚本参数缺省时回落同名环境变量。
+- 理由：单一入口、可复制、可按人定制；`.env` 里默认写 `CARGO_BUILD_JOBS=2` 之类安全值，
+  把「低配机不要满核编译」这条经验固化成默认值而非口头约定。
+- 替代：纯文档说明（易漂移、不生效）、`direnv`（Windows 支持弱）、只在 CI 里配（本机无法复现）。
+- 后果：多一层间接，需靠 `.gitignore` 保证 `.env.local` 不入库；口令一旦误写进 `.env` 会泄露，
+  故约定 `.env` 只允许占位值。
+- 关联：[[environment]]。

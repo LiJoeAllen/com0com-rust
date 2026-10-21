@@ -23,5 +23,10 @@
 - PBH 原生放 `docs/`，同理放在 `.agent/knowledge/brain/`。
 - PKF 是单文件知识产物，放在 `pkf/`，可直接复制到其他项目复用。
 
+## 环境配置
+新机器 clone 后按仓库根 `.env` 补齐本机路径与凭据即可运行，详见
+[brain/wiki/environment.md](./brain/wiki/environment.md)（加载器：`tools/load-env.ps1` /
+`tools/load-env.sh`；私密值写 `.env.local`，已 gitignore）。
+
 ## 流程与治理
 - **分支管理**：见 [BRANCHING.md](./BRANCHING.md) — Trunk-Based 分支模型、命名规范、与 OpenSpec 变更的对应、分支保护（OpenSSF Scorecard 合规）。
