@@ -45,3 +45,29 @@ created: 2026-10-21
 - 后果：多一层间接，需靠 `.gitignore` 保证 `.env.local` 不入库；口令一旦误写进 `.env` 会泄露，
   故约定 `.env` 只允许占位值。
 - 关联：[[environment]]。
+
+---
+type: decision
+status: accepted
+created: 2026-10-21
+---
+
+# 决策：三 workspace 根布局（根 + bus + port），禁用 `-p` 选驱动构建
+
+- 上下文：`com0combus`(KMDF 1.33) 与 `com0comport`(WDM) 同处一个 workspace 时，
+  **任何**构建（含 `cargo build -p com0combus`、`cargo wdk build`）都在编译开始前中止于
+  `multiple configurations of the WDK are detected ... { Kmdf(1,33), Wdm }`。
+- 决策：两个驱动各自成为独立 workspace root，根 workspace `exclude` 它们；
+  驱动一律用 `cargo build --manifest-path crates/<driver>/Cargo.toml` 构建。
+- 理由（源码级，非猜测）：`wdk-build 0.5.1` 的 `src/metadata/mod.rs`
+  `impl TryFrom<&Metadata> for Wdk` 把 `metadata.packages`（整张 cargo metadata，
+  即 workspace 全部成员）的 `package.metadata.wdk` 与根 `workspace.metadata.wdk`
+  一并收进 `HashSet<Wdk>` 并要求 `len() == 1`。它统计的是**全图**而非当前包依赖闭包，
+  因此无法靠 `-p` 规避；这是上游设计约束，非本仓库实现问题。
+- 替代与为何否掉：纯 KMDF 化 port（违背「WDM 精细控制 SERIAL 表面」的既有决策，见
+  [[decisions]] 首条，代价是重写 IRP/WDF 对象模型）；升级 wdk-build 期望上游修复
+  （当前 0.5.1 行为未变，且新版需重新验证，成本高于收益）。
+- 后果：驱动 manifest 的 `[workspace.package]`/`[workspace.dependencies]` 无法继承，
+  版本重复由 `tools/check-deps.ps1`（`-Fix` 可同步，pre-commit + CI 兜底）强制与根一致；
+  附带收益是各驱动 `[profile.*] panic = "abort"` 真正生效。
+- 关联：[[architecture]]、[[bus-driver]]、[[port-driver]]。

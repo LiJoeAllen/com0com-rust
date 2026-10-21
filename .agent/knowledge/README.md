@@ -28,5 +28,16 @@
 [brain/wiki/environment.md](./brain/wiki/environment.md)（加载器：`tools/load-env.ps1` /
 `tools/load-env.sh`；私密值写 `.env.local`，已 gitignore）。
 
+## 构建与 workspace 布局（先读，否则会踩坑）
+仓库有**三个** workspace 根（根 + `crates/com0combus` + `crates/com0comport`），
+这是 `wdk-build` 的硬约束：整张 cargo metadata 里只能出现一种驱动模型配置，
+KMDF/WDM 混用会让**任何**构建在编译前中止。因此：
+- 驱动**不能** `cargo build -p com0combus`，只能用
+  `cargo build --manifest-path crates/com0combus/Cargo.toml`（port 同理）
+- 依赖版本只在根 `Cargo.toml` 手写，副本由 `tools/check-deps.ps1 -Fix` 同步
+
+完整依据见 [brain/brain/architecture.md](./brain/brain/architecture.md)
+与 [brain/brain/decisions.md](./brain/brain/decisions.md) 的「三 workspace 根布局」条目。
+
 ## 流程与治理
 - **分支管理**：见 [BRANCHING.md](./BRANCHING.md) — Trunk-Based 分支模型、命名规范、与 OpenSpec 变更的对应、分支保护（OpenSSF Scorecard 合规）。
