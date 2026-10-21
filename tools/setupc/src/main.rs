@@ -13,17 +13,18 @@ use std::mem::{size_of, zeroed};
 use std::ptr::{null, null_mut};
 
 use windows_sys::core::GUID;
-use windows_sys::Win32::Devices::DeviceAndDriverInstallation::{
+use windows_sys::Win32::errhandlingapi::GetLastError;
+use windows_sys::Win32::fileapi::{CreateFileW, OPEN_EXISTING};
+use windows_sys::Win32::handleapi::{CloseHandle, INVALID_HANDLE_VALUE};
+use windows_sys::Win32::ioapiset::DeviceIoControl;
+use windows_sys::Win32::minwinbase::OVERLAPPED;
+use windows_sys::Win32::setupapi::{
     SetupDiDestroyDeviceInfoList, SetupDiEnumDeviceInterfaces, SetupDiGetClassDevsW,
     SetupDiGetDeviceInterfaceDetailW, DIGCF_DEVICEINTERFACE, DIGCF_PRESENT, HDEVINFO,
     SP_DEVICE_INTERFACE_DATA, SP_DEVICE_INTERFACE_DETAIL_DATA_W,
 };
-use windows_sys::Win32::Foundation::{
-    CloseHandle, GetLastError, ERROR_INSUFFICIENT_BUFFER, GENERIC_READ, GENERIC_WRITE, HANDLE,
-    INVALID_HANDLE_VALUE,
-};
-use windows_sys::Win32::Storage::FileSystem::{CreateFileW, FILE_ATTRIBUTE_NORMAL, OPEN_EXISTING};
-use windows_sys::Win32::System::IO::{DeviceIoControl, OVERLAPPED};
+use windows_sys::Win32::winerror::ERROR_INSUFFICIENT_BUFFER;
+use windows_sys::Win32::winnt::{FILE_ATTRIBUTE_NORMAL, GENERIC_READ, GENERIC_WRITE, HANDLE};
 
 use com0com_common::constants::{DEFAULT_PIN_WIRING, GUID_COM0COM_BUS_BYTES};
 use com0com_common::ioctls;
@@ -96,12 +97,11 @@ fn bus_device_path() -> Result<String, String> {
             &guid,
             null(),
             null_mut(), // hwndparent: HWND (*mut c_void) — no parent window.
-            DIGCF_PRESENT | DIGCF_DEVICEINTERFACE,
+            (DIGCF_PRESENT | DIGCF_DEVICEINTERFACE) as u32,
         )
     };
-    // HDEVINFO 在 0.61 中仍为 isize，而 INVALID_HANDLE_VALUE 已是 HANDLE
-    // （= *mut c_void，值为 -1），两者类型不同，需先转型再比较。
-    if hdev == INVALID_HANDLE_VALUE as isize {
+    // windows-sys 0.100 中 HDEVINFO 与 HANDLE 同为 *mut c_void，可直接比较。
+    if hdev == INVALID_HANDLE_VALUE {
         return Err(format!("SetupDiGetClassDevsW failed (Win32 {})", unsafe {
             GetLastError()
         }));
@@ -127,7 +127,7 @@ fn bus_device_path() -> Result<String, String> {
         SetupDiGetDeviceInterfaceDetailW(hdev, &didata, null_mut(), 0, &mut required, null_mut())
     };
     let probe_err = unsafe { GetLastError() };
-    if probe_ok != 0 || probe_err != ERROR_INSUFFICIENT_BUFFER || required == 0 {
+    if probe_ok != 0 || probe_err != ERROR_INSUFFICIENT_BUFFER as u32 || required == 0 {
         unsafe { SetupDiDestroyDeviceInfoList(hdev) };
         return Err(format!(
             "SetupDiGetDeviceInterfaceDetailW size probe failed (Win32 {}, required {})",
@@ -182,11 +182,11 @@ fn open_bus() -> Result<HANDLE, String> {
     let handle = unsafe {
         CreateFileW(
             wide.as_ptr(),
-            GENERIC_READ | GENERIC_WRITE,
+            GENERIC_READ | GENERIC_WRITE as u32,
             0,
             null(),
-            OPEN_EXISTING,
-            FILE_ATTRIBUTE_NORMAL,
+            OPEN_EXISTING as u32,
+            FILE_ATTRIBUTE_NORMAL as u32,
             null_mut(), // htemplatefile: HANDLE (*mut c_void) — not a file template.
         )
     };

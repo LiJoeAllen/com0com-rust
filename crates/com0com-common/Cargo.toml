@@ -9,3 +9,7 @@ description = "Shared definitions (IOCTLs, SERIAL structs, pair protocol) for th
 
 [lib]
 path = "src/lib.rs"
+
+# 继承根 workspace 的 lint 配置（含 unused_workspace_dependencies = "allow"）。
+[lints]
+workspace = true

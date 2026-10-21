@@ -5,7 +5,7 @@ load_script = '''
 #!@rust
 //! ```cargo
 //! [dependencies]
-//! wdk-build = "0.4.0"
+//! wdk-build = "0.5"
 //! ```
 #![allow(unused_doc_comments)]
 wdk_build::cargo_make::load_rust_driver_makefile()?

@@ -53,9 +53,16 @@ license = "MIT OR Apache-2.0"
 # tools/check-deps.ps1 在 pre-commit 与 CI 中强制它们与本表完全一致。
 [workspace.dependencies]
 com0com-common = { path = "crates/com0com-common" }
-windows-sys = "0.61"
-wdk = "0.3"
-wdk-sys = "0.4"
-wdk-alloc = "0.3"
+# crates.io 的 windows-sys 仍停在 0.61.2；GitHub tag 74 对应 0.100.0。
+windows-sys = { git = "https://github.com/microsoft/windows-rs", tag = "74" }
+wdk = "0.4"
+wdk-sys = "0.5"
+wdk-alloc = "0.4"
 wdk-panic = "0.4"
 wdk-build = "0.5"
+
+# wdk* 条目只服务于两个被排除的驱动 workspace（它们无法继承本表，只能
+# 重复声明，再由 tools/check-deps.ps1 校验一致）。根 workspace 自身没有
+# 成员使用它们，Cargo 因此会报 unused_workspace_dependencies 警告。
+[workspace.lints.cargo]
+unused_workspace_dependencies = "allow"

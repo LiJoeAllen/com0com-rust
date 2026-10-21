@@ -16,15 +16,13 @@ dependencies = [
 
 [[package]]
 name = "windows-link"
-version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f0805222e57f7521d6a62e36fa9163bc891acd422f971defe97d64e70d0a4fe5"
+version = "0.100.0"
+source = "git+https://github.com/microsoft/windows-rs?tag=74#a57cc321bfdbac6bb98c488ba49f399da8fcb98a"
 
 [[package]]
 name = "windows-sys"
-version = "0.61.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ae137229bcbd6cdf0f7b80a31df61766145077ddf49416a728b02cb3921ff3fc"
+version = "0.100.0"
+source = "git+https://github.com/microsoft/windows-rs?tag=74#a57cc321bfdbac6bb98c488ba49f399da8fcb98a"
 dependencies = [
  "windows-link",
 ]
