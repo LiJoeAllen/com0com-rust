@@ -1,9 +1,9 @@
 [package]
 name = "com0com-setupc"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
 description = "User-mode configuration tool for the Rust com0com virtual null-modem serial driver"
-license = "MIT OR Apache-2.0"
 
 # `setupc` is a plain user-mode (std) Win32 console app. Unlike the kernel
 # drivers it does NOT need the WDK toolchain — `cargo build` is enough. It

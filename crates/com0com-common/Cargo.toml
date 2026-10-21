@@ -1,7 +1,8 @@
 [package]
 name = "com0com-common"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
 description = "Shared definitions (IOCTLs, SERIAL structs, pair protocol) for the Rust com0com rewrite. no_std-compatible so it can be linked into both kernel-mode drivers and the user-mode setup tool."
 
 [dependencies]

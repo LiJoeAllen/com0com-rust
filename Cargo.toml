@@ -38,3 +38,12 @@ default-members = [
     "crates/com0com-common",
     "tools/setupc",
 ]
+
+# Single source of truth for version/edition/license of the host-buildable
+# crates. The two kernel drivers are excluded workspace roots, so their
+# manifests carry their own `[workspace.package]` with the same values —
+# bump all three when releasing.
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
