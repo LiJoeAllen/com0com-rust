@@ -35,6 +35,41 @@ if (-not $RepoRoot) {
 
 $effective = [ordered]@{}
 
+# 把指向仓库内、真实存在的相对路径转成绝对路径（正斜杠，无空格）。
+# 必须这么做：wdk-build 的 build.rs 以包目录（crates/<driver>）为 cwd 运行，
+# .env 里的 target/... 相对路径在它眼里指向 crates/<driver>/target/...，必然失效。
+function Resolve-RepoPath([string]$Value) {
+    if ($Value -match '^([A-Za-z]:[\\/]|/)') { return $Value }
+    $joined = Join-Path $RepoRoot $Value
+    if (Test-Path -LiteralPath $joined) { return ($joined -replace '\\', '/') }
+    return $Value
+}
+
+# BINDGEN_EXTRA_CLANG_ARGS 按空白切分，把每个 -I 的目标路径做同样的锚定
+#（该变量不允许含空格路径，见 .env 说明，因此按空白切分是安全的）。
+function Resolve-BindgenArgs([string]$Value) {
+    $toks = $Value -split '\s+'
+    for ($i = 0; $i -lt $toks.Count; $i++) {
+        if ($toks[$i] -eq '-I' -and $i + 1 -lt $toks.Count) {
+            $toks[$i + 1] = Resolve-RepoPath $toks[$i + 1]; $i++
+        }
+        elseif ($toks[$i] -match '^-I(.+)$') {
+            $toks[$i] = '-I' + (Resolve-RepoPath $Matches[1])
+        }
+    }
+    return ($toks -join ' ')
+}
+
+function Set-EnvValue([string]$Name, [string]$Value) {
+    switch -Exact ($Name) {
+        'LIBCLANG_PATH'          { $Value = Resolve-RepoPath $Value }
+        'WDKContentRoot'         { $Value = Resolve-RepoPath $Value }
+        'BINDGEN_EXTRA_CLANG_ARGS' { $Value = Resolve-BindgenArgs $Value }
+    }
+    Set-Item -LiteralPath "Env:$Name" -Value $Value
+    return $Value
+}
+
 foreach ($entry in @(@{ File = '.env'; Force = $false },
                      @{ File = '.env.local'; Force = $true })) {
     $path = Join-Path $RepoRoot $entry.File
@@ -67,10 +102,10 @@ foreach ($entry in @(@{ File = '.env'; Force = $false },
         if (-not $force -and [System.Environment]::GetEnvironmentVariable($name)) { continue }
 
         if ($Print) {
-            $effective[$name] = $value
+            $effective[$name] = (Set-EnvValue $name $value)
         }
         else {
-            Set-Item -LiteralPath "Env:$name" -Value $value
+            $null = Set-EnvValue $name $value
         }
     }
 }

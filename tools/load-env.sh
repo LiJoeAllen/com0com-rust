@@ -19,6 +19,38 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 print_mode=0
 [ "${1:-}" = "--print" ] && print_mode=1
 
+# 把指向仓库内、真实存在的相对路径转成绝对路径（Windows 风格、正斜杠）。
+# 必须这么做：wdk-build 的 build.rs 以包目录（crates/<driver>）为 cwd 运行，
+# .env 里的 target/... 相对路径在它眼里指向 crates/<driver>/target/...，必然失效。
+absolutize() {
+    local v="$1"
+    case "$v" in
+        [A-Za-z]:[\\/]*|/*) printf '%s' "$v"; return ;;
+    esac
+    if [ -e "$repo_root/$v" ]; then
+        cygpath -m "$repo_root/$v" 2>/dev/null || printf '%s' "$repo_root/$v"
+    else
+        printf '%s' "$v"
+    fi
+}
+
+# BINDGEN_EXTRA_CLANG_ARGS 按空白切分，把每个 -I 的目标路径做同样的锚定
+#（该变量不允许含空格路径，见 .env 说明，因此按空白切分是安全的）。
+absolutize_bindgen_args() {
+    local out="" tok prev_I=0
+    for tok in $1; do
+        if [ "$prev_I" = "1" ]; then
+            tok="$(absolutize "$tok")"; prev_I=0
+        elif [ "${tok#-I}" != "$tok" ] && [ "${tok#-I}" != "" ]; then
+            tok="-I$(absolutize "${tok#-I}")"
+        elif [ "$tok" = "-I" ]; then
+            prev_I=1
+        fi
+        out="$out$tok "
+    done
+    printf '%s' "${out% }"
+}
+
 # $1 = 文件名；$2 = 'force' 时覆盖已存在的同名环境变量。
 # .env 是共享模板，不优先生效；.env.local 是本项目显式配置，必须压过机器上的遗留值
 # （典型场景：系统装了 libclang 22，会覆盖成本仓库要求的 18）。
@@ -59,8 +91,16 @@ load_file() {
         fi
 
         if [ "$print_mode" = "1" ]; then
+            case "$name" in
+                LIBCLANG_PATH|WDKContentRoot) value="$(absolutize "$value")" ;;
+                BINDGEN_EXTRA_CLANG_ARGS)     value="$(absolutize_bindgen_args "$value")" ;;
+            esac
             printf '%s=%s\n' "$name" "$value"
         else
+            case "$name" in
+                LIBCLANG_PATH|WDKContentRoot) value="$(absolutize "$value")" ;;
+                BINDGEN_EXTRA_CLANG_ARGS)     value="$(absolutize_bindgen_args "$value")" ;;
+            esac
             export "$name=$value"
         fi
     done < "$path"
