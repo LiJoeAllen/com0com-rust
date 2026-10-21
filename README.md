@@ -55,6 +55,7 @@ com0com-rust/
 │       ├── com0comport.inx    # 端口 INF 模板
 │       └── Makefile.toml
 └── tools/
+    ├── check-deps.ps1         # 第三方依赖版本一致性检查
     ├── setupc/                # 用户态配置工具（com0com-setupc）
     │   ├── Cargo.toml
     │   └── src/main.rs
@@ -70,6 +71,10 @@ com0com-rust/
 >
 > 两个内核驱动**不是**本工作区的成员，各自是独立的工作区根（见下文“构建”），
 > 因为它们声明的驱动模型不同（KMDF vs WDM），而 `wdk-build` 要求整张依赖图只有一种配置。
+>
+> 第三方依赖版本只在根 `Cargo.toml` 的 `[workspace.dependencies]` 中维护。两个驱动根
+> 无法继承该表，只能重复声明；`tools/check-deps.ps1` 会在 pre-commit 与 CI 中强制三者
+> 完全一致，并禁止包内依赖直接写版本号。
 
 ---
 

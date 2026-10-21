@@ -1,11 +1,14 @@
 #!/bin/sh
 # ---------------------------------------------------------------------------
-# com0com-rust 项目规则（新增）：每次 git 提交前必须先 `cargo fmt`。
+# com0com-rust 项目规则：每次 git 提交前必须先 `cargo fmt`，并保证
+# 第三方依赖版本与根 Cargo.toml 的 [workspace.dependencies] 一致。
 #
 # 强制方式：git config core.hooksPath .githooks 已写入本地配置；
-# 若格式不合规，本钩子直接拒绝提交。修复：cargo fmt --all
+# 任一项不合规，本钩子直接拒绝提交。修复：cargo fmt --all，
+# 并按 tools/check-deps.ps1 的报错同步版本。
 #
-# 对应 CI：.github/workflows/ci.yml 的 "fmt check" 步骤（cargo fmt --all -- --check）。
+# 对应 CI：.github/workflows/ci.yml 的 "fmt check" 与
+# "dependency versions check" 步骤。
 #
 # 注意：本机默认工具链 nightly-x86_64-pc-windows-msvc 可能未安装 cargo 组件，
 #       因此自动回退到 stable 或 nightly-gnu 中第一个可用的。
@@ -43,3 +46,19 @@ EOF
     exit 1
 fi
 echo "[pre-commit] fmt OK"
+
+# 依赖版本统一：根 Cargo.toml 的 [workspace.dependencies] 是唯一版本源。
+PS=""
+for p in powershell.exe pwsh; do
+    if command -v "$p" >/dev/null 2>&1; then PS="$p"; break; fi
+done
+if [ -n "$PS" ]; then
+    echo "[pre-commit] dependency versions check"
+    if [ "$PS" = "powershell.exe" ]; then
+        "$PS" -NoProfile -ExecutionPolicy Bypass -File tools/check-deps.ps1 || exit 1
+    else
+        "$PS" -NoProfile -File tools/check-deps.ps1 || exit 1
+    fi
+else
+    echo "[pre-commit] 警告：未找到 PowerShell，跳过依赖版本检查。" >&2
+fi

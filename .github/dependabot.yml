@@ -2,8 +2,13 @@
 # 满足 OpenSSF Scorecard 的 Dependency-Update-Tool 检查。
 version: 2
 updates:
+  # 三个 workspace 根各自有 Cargo.toml/Cargo.lock，都要让 Dependabot 覆盖；
+  # 版本一致性由 tools/check-deps.ps1 与 CI 校验。
   - package-ecosystem: "cargo"
-    directory: "/"
+    directories:
+      - "/"
+      - "/crates/com0combus"
+      - "/crates/com0comport"
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 10

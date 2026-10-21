@@ -40,6 +40,12 @@ jobs:
       - name: fmt check (cargo fmt --all -- --check)
         run: cargo fmt --all -- --check
 
+      # 根 Cargo.toml 是第三方依赖版本的唯一来源；驱动是独立 workspace 根，
+      # 脚本校验它们的 [workspace.dependencies] 与根一致。
+      - name: dependency versions check
+        shell: pwsh
+        run: ./tools/check-deps.ps1
+
       # 只覆盖可在宿主机构建的 crate（com0com-common + tools/setupc）。
       # 内核 crate（com0combus/com0comport）依赖 WDK，无法在普通 runner 上检查。
       - name: clippy (deny warnings)
