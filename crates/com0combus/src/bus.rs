@@ -3,12 +3,14 @@
 use core::ptr;
 
 use wdk_sys::{
-    KeAcquireSpinLock, KeInitializeSpinLock, KeReleaseSpinLock, KIRQL, KSPIN_LOCK, NTSTATUS,
-    PCUNICODE_STRING, WDFCHILDLIST, WDFDEVICE, WDFDRIVER, WDF_DEVICE_INIT,
+    ntddk::{
+        ExAllocatePool2, ExFreePool, KeAcquireSpinLockRaiseToDpc, KeInitializeSpinLock,
+        KeReleaseSpinLock,
+    },
+    KIRQL, KSPIN_LOCK, WDFCHILDLIST, WDFDEVICE,
 };
 
 use com0com_common::{
-    constants::{GUID_COM0COM_BUS_BYTES, GUID_DEVINTERFACE_COMPORT},
     pair::{PairContext, PortState},
     protocol::Com0comPairParams,
 };
@@ -49,21 +51,33 @@ pub struct BusState {
 
 static mut BUS: *mut BusState = ptr::null_mut();
 
+/// Publish the singleton bus state.
+///
+/// # Safety
+/// `state` must come from [`alloc_bus_state`], and this must run once during
+/// device add before any other bus entry point is reachable.
 pub unsafe fn set_bus(state: *mut BusState) {
     BUS = state;
 }
 
+/// Borrow the singleton bus state.
+///
+/// # Safety
+/// The returned reference aliases the singleton; callers must serialize access
+/// to the fields it guards through the bus spinlock.
 pub unsafe fn bus() -> Option<&'static mut BusState> {
     BUS.as_mut()
 }
 
+/// # Safety
+/// `lock` must point to an initialized `KSPIN_LOCK`.
 #[inline]
 pub unsafe fn raw_lock(lock: *mut KSPIN_LOCK) -> KIRQL {
-    let mut irql: KIRQL = 0;
-    KeAcquireSpinLock(lock, &mut irql);
-    irql
+    KeAcquireSpinLockRaiseToDpc(lock)
 }
 
+/// # Safety
+/// `lock` must be the lock acquired by [`raw_lock`], released at its `irql`.
 #[inline]
 pub unsafe fn raw_unlock(lock: *mut KSPIN_LOCK, irql: KIRQL) {
     KeReleaseSpinLock(lock, irql);
@@ -82,20 +96,23 @@ pub fn guid_from_bytes(b: &[u8; 16]) -> wdk_sys::GUID {
 pub const GUID_COM0COM_BUS_WDF: () = (); // placeholder; use guid_from_bytes at call sites
 
 /// Find a free slot index, or `None` if at capacity. Caller must hold the lock.
+///
+/// # Safety
+/// `state` must be the live singleton and the bus spinlock must be held.
 pub unsafe fn alloc_slot(state: &mut BusState) -> Option<usize> {
-    for i in 0..MAX_PAIRS {
-        if state.slots[i].is_null() {
-            return Some(i);
-        }
-    }
-    None
+    state.slots.iter().position(|slot| slot.is_null())
 }
 
 /// Allocate and zero a `PairSlot` in non-paged pool.
+///
+/// # Safety
+/// Must be called at IRQL <= DISPATCH_LEVEL; the returned pointer is freed only
+/// by [`free_pair_slot`].
 pub unsafe fn alloc_pair_slot() -> *mut PairSlot {
     let size = core::mem::size_of::<PairSlot>() as u64;
-    // VERIFY: POOL_FLAG_NON_PAGED value against your installed WDK headers.
-    let ptr = wdk_sys::ExAllocatePool2(wdk_sys::POOL_FLAG_NON_PAGED, size, COM0COM_TAG);
+    // WDK 10.0.28000 bindings expose POOL_FLAG_NON_PAGED at the crate root;
+    // ExAllocatePool2 itself is generated in the ntddk module.
+    let ptr = ExAllocatePool2(wdk_sys::POOL_FLAG_NON_PAGED, size, COM0COM_TAG);
     if ptr.is_null() {
         return ptr::null_mut();
     }
@@ -103,16 +120,22 @@ pub unsafe fn alloc_pair_slot() -> *mut PairSlot {
     ptr as *mut PairSlot
 }
 
+/// # Safety
+/// `slot` must come from [`alloc_pair_slot`] and must not be used afterwards.
 pub unsafe fn free_pair_slot(slot: *mut PairSlot) {
     if !slot.is_null() {
-        wdk_sys::ExFreePool(slot as wdk_sys::PVOID);
+        ExFreePool(slot as wdk_sys::PVOID);
     }
 }
 
 /// Allocate and initialize a `PairContext` in non-paged pool.
+///
+/// # Safety
+/// Must be called at IRQL <= DISPATCH_LEVEL; the resulting VA is shared with
+/// the port drivers and freed only by [`free_pair_context`].
 pub unsafe fn alloc_pair_context(pair_id: u32) -> *mut PairContext {
     let size = core::mem::size_of::<PairContext>() as u64;
-    let ptr = wdk_sys::ExAllocatePool2(wdk_sys::POOL_FLAG_NON_PAGED, size, COM0COM_TAG);
+    let ptr = ExAllocatePool2(wdk_sys::POOL_FLAG_NON_PAGED, size, COM0COM_TAG);
     if ptr.is_null() {
         return ptr::null_mut();
     }
@@ -133,16 +156,22 @@ pub unsafe fn alloc_pair_context(pair_id: u32) -> *mut PairContext {
     ptr as *mut PairContext
 }
 
+/// # Safety
+/// `pc` must come from [`alloc_pair_context`], have a zero ref count, and no
+/// port may hold its VA any more.
 pub unsafe fn free_pair_context(pc: *mut PairContext) {
     if !pc.is_null() {
-        wdk_sys::ExFreePool(pc as wdk_sys::PVOID);
+        ExFreePool(pc as wdk_sys::PVOID);
     }
 }
 
 /// Allocate and initialize the singleton bus state in non-paged pool.
+///
+/// # Safety
+/// `fdo` and `child_list` must be live WDF handles owned by this driver.
 pub unsafe fn alloc_bus_state(fdo: WDFDEVICE, child_list: WDFCHILDLIST) -> *mut BusState {
     let size = core::mem::size_of::<BusState>() as u64;
-    let ptr = wdk_sys::ExAllocatePool2(wdk_sys::POOL_FLAG_NON_PAGED, size, COM0COM_TAG);
+    let ptr = ExAllocatePool2(wdk_sys::POOL_FLAG_NON_PAGED, size, COM0COM_TAG);
     if ptr.is_null() {
         return ptr::null_mut();
     }
@@ -157,14 +186,15 @@ pub unsafe fn alloc_bus_state(fdo: WDFDEVICE, child_list: WDFCHILDLIST) -> *mut 
 }
 
 /// Locate the slot for a pair id under the lock. Returns the slot pointer.
+///
+/// # Safety
+/// The bus spinlock must be held so the returned slot cannot be freed.
 pub unsafe fn find_slot(state: &BusState, pair_id: u32) -> Option<*mut PairSlot> {
-    for i in 0..MAX_PAIRS {
-        let slot = state.slots[i];
-        if !slot.is_null() && (*slot).pair_id == pair_id {
-            return Some(slot);
-        }
-    }
-    None
+    state
+        .slots
+        .iter()
+        .copied()
+        .find(|&slot| !slot.is_null() && (*slot).pair_id == pair_id)
 }
 
 /// Convenience: convert a kernel VA back to a `&mut PairContext`.

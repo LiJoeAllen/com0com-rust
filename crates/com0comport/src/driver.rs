@@ -1,16 +1,23 @@
 //! WDM DriverEntry, AddDevice, and the kernel-to-bus PORT_LINK handshake.
 
-use core::ptr;
+use core::{
+    ffi::c_void,
+    ptr,
+    sync::atomic::{AtomicPtr, Ordering},
+};
 
+use wdk_sys::NT_SUCCESS as nt_success;
 use wdk_sys::{
-    nt_success, DevicePropertyCompatibleIDs, Executive, IoAttachDeviceToDeviceStack,
-    IoBuildDeviceIoControlRequest, IoCallDriver, IoCreateDevice, IoDeleteDevice, IoDetachDevice,
-    IoFreeIrp, IoGetDeviceInterfaces, IoGetDeviceObjectPointer, IoGetDeviceProperty, IoStatusBlock,
-    KeInitializeEvent, KeWaitForSingleObject, DEVICE_INITIALIZING, DEVICE_OBJECT, DO_BUFFERED_IO,
-    DRIVER_OBJECT, FILE_DEVICE_SERIAL_PORT, IRP_MJ_CLEANUP, IRP_MJ_CLOSE, IRP_MJ_CREATE,
-    IRP_MJ_DEVICE_CONTROL, IRP_MJ_PNP, IRP_MJ_POWER, IRP_MJ_READ, IRP_MJ_SYSTEM_CONTROL,
-    IRP_MJ_WRITE, KPROCESSOR_MODE, NTSTATUS, PDEVICE_OBJECT, PDRIVER_OBJECT, PIRP, PUNICODE_STRING,
-    UNICODE_STRING,
+    ntddk::{
+        ExAllocatePool2, ExFreePool, IoAttachDeviceToDeviceStack, IoBuildDeviceIoControlRequest,
+        IoCreateDevice, IoDeleteDevice, IoDetachDevice, IoGetDeviceInterfaces,
+        IoGetDeviceObjectPointer, IoGetDeviceProperty, IofCallDriver, KeInitializeEvent,
+        KeWaitForSingleObject, ObfDereferenceObject,
+    },
+    DO_BUFFERED_IO, DO_DEVICE_INITIALIZING, FILE_DEVICE_SERIAL_PORT, IO_STATUS_BLOCK,
+    IRP_MJ_CLEANUP, IRP_MJ_CLOSE, IRP_MJ_CREATE, IRP_MJ_DEVICE_CONTROL, IRP_MJ_PNP, IRP_MJ_POWER,
+    IRP_MJ_READ, IRP_MJ_SYSTEM_CONTROL, IRP_MJ_WRITE, NTSTATUS, PDEVICE_OBJECT, PDRIVER_CANCEL,
+    PDRIVER_OBJECT, PIO_COMPLETION_ROUTINE, PIO_STACK_LOCATION, PIRP, PZZWSTR, UNICODE_STRING,
 };
 
 use com0com_common::ioctls::IOCTL_COM0COM_PORT_LINK;
@@ -27,8 +34,89 @@ pub struct PortExtension {
     pub port_index: u8,
     pub pair_va: u64,
     pub com_symlink: UNICODE_STRING, // valid Length != 0 once registered
+    pub com_symlink_buffer: [u16; 48],
 }
 
+/// Return the current I/O stack location using the WDK inline layout.
+#[inline]
+pub(crate) unsafe fn current_irp_stack_location(irp: PIRP) -> PIO_STACK_LOCATION {
+    (*irp)
+        .Tail
+        .Overlay
+        .__bindgen_anon_2
+        .__bindgen_anon_1
+        .CurrentStackLocation
+}
+
+/// Advance an IRP past this driver without changing its stack parameters.
+#[inline]
+pub(crate) unsafe fn skip_current_irp_stack_location(irp: PIRP) {
+    (*irp).CurrentLocation += 1;
+    let current = &mut (*irp)
+        .Tail
+        .Overlay
+        .__bindgen_anon_2
+        .__bindgen_anon_1
+        .CurrentStackLocation;
+    *current = (*current).add(1);
+}
+
+/// Mark the IRP pending exactly as the WDK inline helper does.
+#[inline]
+pub(crate) unsafe fn mark_irp_pending(irp: PIRP) {
+    (*current_irp_stack_location(irp)).Control |= wdk_sys::SL_PENDING_RETURNED as u8;
+}
+
+/// Atomically replace an IRP cancel routine and return its previous value.
+///
+/// This mirrors the WDK `IoSetCancelRoutine` inline helper. `PDRIVER_CANCEL`
+/// is an `Option<unsafe extern "C" fn(...)>` in the generated bindings, so
+/// `Option::is_some()` remains the ownership test used by the cancel protocol.
+#[inline]
+pub(crate) unsafe fn set_cancel_routine(irp: PIRP, routine: PDRIVER_CANCEL) -> PDRIVER_CANCEL {
+    let new_routine = routine.map_or(ptr::null_mut(), |callback| callback as *mut c_void);
+    let slot = &*core::ptr::addr_of_mut!((*irp).CancelRoutine).cast::<AtomicPtr<c_void>>();
+    let previous = slot.swap(new_routine, Ordering::SeqCst);
+    core::mem::transmute::<*mut c_void, PDRIVER_CANCEL>(previous)
+}
+
+/// Copy the current IRP parameters to the next stack location.
+#[inline]
+pub(crate) unsafe fn copy_current_irp_stack_location_to_next(irp: PIRP) {
+    let current = current_irp_stack_location(irp);
+    let next = current.sub(1);
+    let parameter_bytes = core::mem::offset_of!(wdk_sys::IO_STACK_LOCATION, CompletionRoutine);
+    ptr::copy_nonoverlapping(current.cast::<u8>(), next.cast::<u8>(), parameter_bytes);
+    (*next).Control = 0;
+}
+
+/// Install a completion routine in the next IRP stack location.
+#[inline]
+pub(crate) unsafe fn set_completion_routine(
+    irp: PIRP,
+    routine: PIO_COMPLETION_ROUTINE,
+    context: *mut c_void,
+    invoke_on_success: bool,
+    invoke_on_error: bool,
+    invoke_on_cancel: bool,
+) {
+    let stack = current_irp_stack_location(irp).sub(1);
+    (*stack).CompletionRoutine = routine;
+    (*stack).Context = context;
+    (*stack).Control = 0;
+    if invoke_on_success {
+        (*stack).Control |= wdk_sys::SL_INVOKE_ON_SUCCESS as u8;
+    }
+    if invoke_on_error {
+        (*stack).Control |= wdk_sys::SL_INVOKE_ON_ERROR as u8;
+    }
+    if invoke_on_cancel {
+        (*stack).Control |= wdk_sys::SL_INVOKE_ON_CANCEL as u8;
+    }
+}
+
+/// # Safety
+/// Invoked by the I/O manager with a valid `DRIVER_OBJECT`; never call directly.
 #[export_name = "DriverEntry"]
 pub unsafe extern "system" fn driver_entry(
     driver: PDRIVER_OBJECT,
@@ -65,11 +153,11 @@ unsafe extern "C" fn add_device(driver: PDRIVER_OBJECT, pdo: PDEVICE_OBJECT) -> 
     let mut device: PDEVICE_OBJECT = ptr::null_mut();
     let size = core::mem::size_of::<PortExtension>() as u32;
     let mut dev_name_buf = [0u16; 48];
-    let dev_name = comname::device_name_wide(pair_id, port_index, &mut dev_name_buf);
+    let mut dev_name = comname::device_name_wide(pair_id, port_index, &mut dev_name_buf);
     let status = IoCreateDevice(
         driver,
         size,
-        &dev_name as *const UNICODE_STRING,
+        &mut dev_name,
         FILE_DEVICE_SERIAL_PORT,
         0,
         0,
@@ -102,9 +190,9 @@ unsafe extern "C" fn add_device(driver: PDRIVER_OBJECT, pdo: PDEVICE_OBJECT) -> 
     }
     (*ext).pair_va = pair_va;
 
-    comname::register(device, ext);
+    comname::register(ext);
 
-    (*device).Flags = ((*device).Flags | DO_BUFFERED_IO) & !DEVICE_INITIALIZING;
+    (*device).Flags = ((*device).Flags | DO_BUFFERED_IO) & !DO_DEVICE_INITIALIZING;
     wdk_sys::STATUS_SUCCESS
 }
 
@@ -113,16 +201,15 @@ unsafe fn parse_pair_from_pdo(pdo: PDEVICE_OBJECT) -> Option<(u32, u8)> {
     let mut len: u32 = 0;
     let status = IoGetDeviceProperty(
         pdo,
-        DevicePropertyCompatibleIDs,
+        wdk_sys::DEVICE_REGISTRY_PROPERTY::DevicePropertyCompatibleIDs,
         0,
         ptr::null_mut(),
         &mut len,
-        ptr::null_mut(),
     );
     if status != wdk_sys::STATUS_BUFFER_TOO_SMALL && status != wdk_sys::STATUS_BUFFER_OVERFLOW {
         return None;
     }
-    let buf = wdk_sys::ExAllocatePool2(
+    let buf = ExAllocatePool2(
         wdk_sys::POOL_FLAG_NON_PAGED,
         len as u64,
         u32::from_le_bytes(*b"cprt"),
@@ -132,18 +219,17 @@ unsafe fn parse_pair_from_pdo(pdo: PDEVICE_OBJECT) -> Option<(u32, u8)> {
     }
     let status = IoGetDeviceProperty(
         pdo,
-        DevicePropertyCompatibleIDs,
+        wdk_sys::DEVICE_REGISTRY_PROPERTY::DevicePropertyCompatibleIDs,
         len,
         buf,
         &mut len,
-        ptr::null_mut(),
     );
     if !nt_success(status) {
-        wdk_sys::ExFreePool(buf);
+        ExFreePool(buf);
         return None;
     }
     let result = parse_compat_ids(buf as *const u16, len as usize);
-    wdk_sys::ExFreePool(buf);
+    ExFreePool(buf);
     result
 }
 
@@ -152,7 +238,8 @@ unsafe fn parse_compat_ids(wide: *const u16, len_bytes: usize) -> Option<(u32, u
     let mut i = 0;
     while i < n {
         // Find a string beginning with "c0c0_".
-        if wide.add(i).read() == b'c' as u16
+        if i + 14 < n
+            && wide.add(i).read() == b'c' as u16
             && wide.add(i + 1).read() == b'0' as u16
             && wide.add(i + 2).read() == b'c' as u16
             && wide.add(i + 3).read() == b'0' as u16
@@ -192,23 +279,37 @@ unsafe fn parse_compat_ids(wide: *const u16, len_bytes: usize) -> Option<(u32, u
 /// Open the bus control device interface and issue PORT_LINK to fetch the
 /// shared `PairContext` VA.
 unsafe fn link_to_bus(pair_id: u32, port_index: u8) -> u64 {
-    let mut iface: PUNICODE_STRING = ptr::null_mut();
-    let mut guid = crate::comname::bus_guid();
+    let mut iface: PZZWSTR = ptr::null_mut();
+    let guid = crate::comname::bus_guid();
     let status = IoGetDeviceInterfaces(
         &guid as *const wdk_sys::GUID,
         ptr::null_mut(),
         0,
         &mut iface,
     );
-    if !nt_success(status) || iface.is_null() || (*iface).Buffer.is_null() {
+    if !nt_success(status) || iface.is_null() || *iface == 0 {
         return 0;
     }
+
+    let mut iface_len = 0usize;
+    while *iface.add(iface_len) != 0 {
+        iface_len += 1;
+    }
+    let mut iface_name = UNICODE_STRING {
+        Length: (iface_len * core::mem::size_of::<u16>()) as u16,
+        MaximumLength: ((iface_len + 1) * core::mem::size_of::<u16>()) as u16,
+        Buffer: iface,
+    };
     let mut file_obj: *mut wdk_sys::FILE_OBJECT = ptr::null_mut();
     let mut dev_obj: PDEVICE_OBJECT = ptr::null_mut();
-    let status =
-        IoGetDeviceObjectPointer(iface, wdk_sys::FILE_READ_DATA, &mut file_obj, &mut dev_obj);
-    wdk_sys::ExFreePool(iface as wdk_sys::PVOID);
-    if !nt_success(status) || dev_obj.is_null() {
+    let status = IoGetDeviceObjectPointer(
+        &mut iface_name,
+        wdk_sys::FILE_READ_DATA,
+        &mut file_obj,
+        &mut dev_obj,
+    );
+    ExFreePool(iface as wdk_sys::PVOID);
+    if !nt_success(status) || file_obj.is_null() || dev_obj.is_null() {
         return 0;
     }
 
@@ -220,8 +321,8 @@ unsafe fn link_to_bus(pair_id: u32, port_index: u8) -> u64 {
     let mut out_buf = PortLinkResponse { pair_va: 0 };
 
     let mut event = core::mem::zeroed::<wdk_sys::KEVENT>();
-    KeInitializeEvent(&mut event, 1 /* NotificationEvent */, 0);
-    let mut iosb = core::mem::zeroed::<IoStatusBlock>();
+    KeInitializeEvent(&mut event, wdk_sys::_EVENT_TYPE::NotificationEvent, 0);
+    let mut iosb = core::mem::zeroed::<IO_STATUS_BLOCK>();
 
     let irp = IoBuildDeviceIoControlRequest(
         IOCTL_COM0COM_PORT_LINK,
@@ -232,22 +333,25 @@ unsafe fn link_to_bus(pair_id: u32, port_index: u8) -> u64 {
         core::mem::size_of::<PortLinkResponse>() as u32,
         0, // InternalDeviceControl = FALSE (IRP_MJ_DEVICE_CONTROL)
         &mut event as *mut wdk_sys::KEVENT,
-        &mut iosb as *mut IoStatusBlock,
+        &mut iosb as *mut IO_STATUS_BLOCK,
     );
     if irp.is_null() {
+        ObfDereferenceObject(file_obj as wdk_sys::PVOID);
         return 0;
     }
-    let status = IoCallDriver(dev_obj, irp);
+    let status = IofCallDriver(dev_obj, irp);
     if status == wdk_sys::STATUS_PENDING {
-        KeWaitForSingleObject(
+        let _ = KeWaitForSingleObject(
             &mut event as *mut wdk_sys::KEVENT as *mut core::ffi::c_void,
-            0, // Executive
-            0, // KernelMode
-            0, // not alertable
+            wdk_sys::_KWAIT_REASON::Executive,
+            wdk_sys::_MODE::KernelMode as i8,
+            0,
             ptr::null_mut(),
         );
     }
-    if nt_success(iosb.Status) {
+    let final_status = iosb.__bindgen_anon_1.Status;
+    ObfDereferenceObject(file_obj as wdk_sys::PVOID);
+    if nt_success(final_status) {
         out_buf.pair_va
     } else {
         0

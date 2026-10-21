@@ -2,29 +2,32 @@
 
 use core::ptr;
 
+use com0com_common::constants::GUID_COM0COM_BUS_BYTES;
+use wdk::nt_success;
 use wdk_sys::{
-    call_unsafe_wdf_function_binding, nt_success, DRIVER_OBJECT, NTSTATUS, PCUNICODE_STRING,
-    PDRIVER_OBJECT, WDFDEVICE, WDFDEVICE_INIT, WDFDRIVER, WDF_CHILD_LIST_CONFIG, WDF_DRIVER_CONFIG,
-    WDF_DRIVER_CONFIG_SIZE, WDF_IO_QUEUE_CONFIG, WDF_NO_HANDLE, WDF_NO_OBJECT_ATTRIBUTES,
-    WDF_NO_STRING,
+    call_unsafe_wdf_function_binding, NTSTATUS, PCUNICODE_STRING, PDRIVER_OBJECT, WDFCHILDLIST,
+    WDFDEVICE, WDFDEVICE_INIT, WDFDRIVER, WDFQUEUE, WDF_CHILD_LIST_CONFIG, WDF_DRIVER_CONFIG,
+    WDF_IO_QUEUE_CONFIG, WDF_NO_OBJECT_ATTRIBUTES,
 };
 
 use crate::{
-    bus::{self, guid_from_bytes, raw_lock, raw_unlock, BusState, Com0comChildId},
+    bus::{self, guid_from_bytes, Com0comChildId},
     ioctl, pdo,
 };
 
+/// # Safety
+/// Invoked by the I/O manager with a valid `DRIVER_OBJECT`; never call directly.
 #[export_name = "DriverEntry"]
 pub unsafe extern "system" fn driver_entry(
     driver: PDRIVER_OBJECT,
     registry_path: PCUNICODE_STRING,
 ) -> NTSTATUS {
     let mut driver_config = WDF_DRIVER_CONFIG {
-        Size: WDF_DRIVER_CONFIG_SIZE,
+        Size: core::mem::size_of::<WDF_DRIVER_CONFIG>() as u32,
         EvtDriverDeviceAdd: Some(evt_driver_device_add),
         ..WDF_DRIVER_CONFIG::default()
     };
-    let mut driver_handle = WDF_NO_HANDLE;
+    let mut driver_handle: WDFDRIVER = ptr::null_mut();
     let status = call_unsafe_wdf_function_binding!(
         WdfDriverCreate,
         driver,
@@ -41,9 +44,9 @@ pub unsafe extern "system" fn driver_entry(
 
 unsafe extern "C" fn evt_driver_device_add(
     _driver: WDFDRIVER,
-    device_init: *mut WDFDEVICE_INIT,
+    mut device_init: *mut WDFDEVICE_INIT,
 ) -> NTSTATUS {
-    let mut device: WDFDEVICE = WDF_NO_HANDLE;
+    let mut device: WDFDEVICE = ptr::null_mut();
     let status = call_unsafe_wdf_function_binding!(
         WdfDeviceCreate,
         &mut device_init,
@@ -56,10 +59,16 @@ unsafe extern "C" fn evt_driver_device_add(
 
     // Default I/O queue: all major functions land in our dispatcher. The port
     // driver and setupc send private IOCTLs here.
-    let mut queue_config = WDF_IO_QUEUE_CONFIG::default();
-    queue_config.Size = core::mem::size_of::<WDF_IO_QUEUE_CONFIG>() as u32;
-    queue_config.EvtIoDeviceControl = Some(ioctl::evt_io_device_control);
-    let mut queue = WDF_NO_HANDLE;
+    let mut queue_config = WDF_IO_QUEUE_CONFIG {
+        Size: core::mem::size_of::<WDF_IO_QUEUE_CONFIG>() as u32,
+        DispatchType: wdk_sys::_WDF_IO_QUEUE_DISPATCH_TYPE::WdfIoQueueDispatchParallel,
+        PowerManaged: wdk_sys::_WDF_TRI_STATE::WdfUseDefault,
+        AllowZeroLengthRequests: 1,
+        DefaultQueue: 1,
+        EvtIoDeviceControl: Some(ioctl::evt_io_device_control),
+        ..WDF_IO_QUEUE_CONFIG::default()
+    };
+    let mut queue: WDFQUEUE = ptr::null_mut();
     let status = call_unsafe_wdf_function_binding!(
         WdfIoQueueCreate,
         device,
@@ -72,15 +81,18 @@ unsafe extern "C" fn evt_driver_device_add(
     }
 
     // Static child list for the virtual port PDOs.
-    let mut child_config = WDF_CHILD_LIST_CONFIG::default();
-    child_config.Size = core::mem::size_of::<WDF_CHILD_LIST_CONFIG>() as u32;
-    child_config.EvtChildListCreateDevice = Some(pdo::evt_child_list_create_device);
-    child_config.IdentificationDescriptionType.Size = core::mem::size_of::<Com0comChildId>() as u32;
-    let mut child_list = WDF_NO_HANDLE;
+    let mut child_config = WDF_CHILD_LIST_CONFIG {
+        Size: core::mem::size_of::<WDF_CHILD_LIST_CONFIG>() as u32,
+        EvtChildListCreateDevice: Some(pdo::evt_child_list_create_device),
+        IdentificationDescriptionSize: core::mem::size_of::<Com0comChildId>() as u32,
+        ..WDF_CHILD_LIST_CONFIG::default()
+    };
+    let mut child_list: WDFCHILDLIST = ptr::null_mut();
     let status = call_unsafe_wdf_function_binding!(
         WdfChildListCreate,
         device,
         &mut child_config,
+        WDF_NO_OBJECT_ATTRIBUTES,
         &mut child_list
     );
     if !nt_success(status) {
@@ -88,12 +100,12 @@ unsafe extern "C" fn evt_driver_device_add(
     }
 
     // Control device interface (setupc + port driver talk here).
-    let bus_guid = guid_from_bytes(&bus::GUID_COM0COM_BUS_BYTES);
+    let bus_guid = guid_from_bytes(&GUID_COM0COM_BUS_BYTES);
     let status = call_unsafe_wdf_function_binding!(
         WdfDeviceCreateDeviceInterface,
         device,
         &bus_guid,
-        WDF_NO_STRING
+        ptr::null()
     );
     if !nt_success(status) {
         return status;

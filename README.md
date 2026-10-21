@@ -9,9 +9,10 @@
 - 两端口之间通过共享内存环缓冲做数据转发，并实现 modem 信号映射；
 - 用户态配置工具 `setupc`（对标原版 `setupc`/`setupg`）。
 
-> ⚠️ **状态**：核心架构、两套驱动源码、共享协议、`setupc` 均已完成并通过类型检查。
-> 内核驱动的**真正编译与加载必须在装有 WDK/eWDK 的机器上进行**（见下文“环境”）。
-> 本仓库在“没有 WDK 的机器”上只能构建 `com0com-common` 与 `setupc` 两个纯用户态/无 std 的包。
+> ⚠️ **状态**：核心架构、两套驱动源码、共享协议、`setupc` 均已完成。
+> 两套内核驱动已在 **WDK 10.0.28000 + wdk-sys 0.4.0** 环境下**真实编译通过**
+> （2026-10-21 以 debug 构建验证；产物尚未在测试虚拟机中加载）。
+> 没有 WDK 的机器仍只能构建 `com0com-common` 与 `setupc` 两个纯用户态/无 std 的包。
 
 ---
 
@@ -72,7 +73,17 @@ com0com-rust/
 
 1. **安装 WDK / eWDK 与对应 Visual Studio + Windows SDK。**
    - 推荐用微软的 **eWDK（Enterprise WDK）** 镜像，自带匹配的 SDK 与工具链。
-   - 需要 **Clang/LLVM 17**（WDK 用 Clang 编译内核，而非 MSVC）。
+   - WDK 自带 Clang 用于编译内核（而非 MSVC），`cargo-wdk` 会调用它。
+   - **bindgen 使用的 libclang 请选 18–20（重要）**：libclang **22.1.x** 存在
+     `clang_getTypeDeclaration` 回归——对 `typedef struct X X; struct X {...};` 返回前向声明
+     而非定义，导致 `wdk-sys` 生成的结构体退化为 `_address: u8`，编译时报几十条
+     `E0080 size_of 溢出`（很容易误判成“没装 WDK”）。用 `LIBCLANG_PATH` 指向 LLVM 18 的
+     `bin` 目录即可；也可 `py -m pip install libclang==18.1.1` 后指向 wheel 内的 `clang/native`。
+   - **WDK 10.0.28000 的 include 目录不含 SDK 头文件**：`Include/10.0.28000.0` 下只有
+     `km`/`shared` 等 WDK 负载，`shared`/`ucrt`/`um` 需由另一版本的 Windows SDK
+     （如 10.0.26100.0）提供。bindgen 报 `specstrings.h` 之类缺失时，用
+     `BINDGEN_EXTRA_CLANG_ARGS` 追加 SDK 的 include 路径；该变量按空白切分，路径不能含空格
+     （可先做 junction/symlink 到无空格路径）。
 
 2. **安装 Rust 工具链与 `cargo-wdk`：**
    ```powershell
@@ -105,6 +116,15 @@ cargo build -p com0com-setupc --release
 cargo build --manifest-path crates/com0combus/Cargo.toml --release
 cargo build --manifest-path crates/com0comport/Cargo.toml --release
 ```
+
+> 本机实测通过的构建环境（WDK 10.0.28000 + Windows SDK 10.0.26100 + libclang 18.1），
+> 需要显式指定 libclang 与 SDK 头文件路径（原因见上文“环境”）：
+> ```powershell
+> $env:LIBCLANG_PATH = "D:\path\to\llvm18\bin"
+> $env:BINDGEN_EXTRA_CLANG_ARGS = "-I D:/path/to/sdk26100/shared -I D:/path/to/sdk26100/ucrt -I D:/path/to/sdk26100/um"
+> cargo build -j 2 --manifest-path crates/com0combus/Cargo.toml
+> ```
+> 首次构建会为 `wdk-sys` 跑 bindgen，耗时且吃 CPU；弱机器务必限制并行度（`-j 2`）。
 
 > **为什么不能用 `cargo build -p com0combus`**：`wdk-build` 会遍历整张 cargo-metadata
 > 依赖图并要求只有一种 WDK 驱动模型配置。`com0combus` 声明 KMDF 1.33、`com0comport`
@@ -218,17 +238,16 @@ setupc set   <id> [same flags as add, minus --id/--port-*]
   WDK/wdk-sys FFI、操作 `KSPIN_LOCK` / `PIRP` / 裸指针、挂起并取消 IRP 本质就是
   `unsafe`。但所有 unsafe 同样收敛到小 helper（`read_in` / `write_out` / `lock` /
   `unlock` / `read_struct` / `write_struct` / `raw_lock` / `raw_unlock` 等），
-  数据流上**只有一次必要的边界拷贝**，没有冗余拷贝。内核驱动的真正编译/加载仍须在
-  eWDK 环境完成（见下文“环境”）。
+  数据流上**只有一次必要的边界拷贝**，没有冗余拷贝。内核驱动现已在 WDK 环境编译通过，
+  加载运行仍须在测试虚拟机验证（见下文“环境”“已知风险”）。
 
 ## 已知风险 / 需在上机验证的点
 
-- 本次新增的 WDK 符号需在 eWDK 中确认签名/导出：`IoMarkIrpPending`、
-  `IoAcquireCancelSpinLock`、`IoReleaseCancelSpinLock`、`KeQueryInterruptTime`
-  （源码中均以 `// VERIFY(eWDK): <符号名>` 标注）。
-- `wdk-sys` 的符号名（`POOL_FLAG_NON_PAGED`、`WDF_CHILD_RETRIEVE_INFO` 字段、
-  `WdfChildList*` 绑定、`IoReleaseCancelSpinLock`、`KeWaitForSingleObject` 参数等）在源码中
-  以“按官方 WDK 文档拼写”的方式书写，需在真实 WDK 构建中逐项确认；如有差异以 WDK 头文件为准。
+- **编译已验证**（2026-10-21）：`com0comport`（WDM）与 `com0combus`（KMDF 1.33）均基于
+  WDK 10.0.28000 + `wdk-sys` 0.4.0 编译通过，原先“符号名/签名待确认”的风险项已关闭。
+  注意普通 `cargo build` 产出的是 `.dll`（`cargo wdk build` 才会生成并改名 `.sys`），
+  这只证明编译通过，**不代表可直接加载**。
+- **尚未在测试虚拟机加载/运行**：PDO 枚举、COM 符号链接、`setupc` 端到端流程均待真机验证。
 - 内核 crate `Cargo.toml` 内含 `[profile.dev]/[profile.release] panic = "abort"`
   （内核不支持 unwind）。二者现已是独立工作区根，该 profile **会正常生效**，
   不再出现“profile 被忽略”的告警。

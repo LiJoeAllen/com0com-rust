@@ -5,14 +5,17 @@
 use core::{mem, ptr};
 
 use wdk_sys::{
-    IoCompleteRequest, IoGetCurrentIrpStackLocation, IoSetCancelRoutine, KeAcquireSpinLock,
-    KeReleaseSpinLock, IO_NO_INCREMENT, KIRQL, KSPIN_LOCK, NTSTATUS, PIRP,
+    ntddk::{
+        IoAcquireCancelSpinLock, IoReleaseCancelSpinLock, IofCompleteRequest as IoCompleteRequest,
+        KeAcquireSpinLockRaiseToDpc, KeReleaseSpinLock,
+    },
+    IO_NO_INCREMENT, KIRQL, KSPIN_LOCK, NTSTATUS, PIRP,
 };
 
 use com0com_common::{
     constants::{
-        SERIAL_CTS_STATE, SERIAL_DCD_STATE, SERIAL_DSR_STATE, SERIAL_DTR_STATE, SERIAL_EV_RXCHAR,
-        SERIAL_EV_RXFLAG, SERIAL_RI_STATE, SERIAL_RTS_STATE,
+        SERIAL_CTS_STATE, SERIAL_DSR_STATE, SERIAL_DTR_STATE, SERIAL_EV_RXCHAR, SERIAL_EV_RXFLAG,
+        SERIAL_RTS_STATE,
     },
     emulation::{clamp_queue_size, XoffState},
     ioctls,
@@ -24,7 +27,10 @@ use com0com_common::{
     },
 };
 
-use crate::{driver::PortExtension, readwrite};
+use crate::{
+    driver::{current_irp_stack_location, mark_irp_pending, set_cancel_routine, PortExtension},
+    readwrite,
+};
 
 // `PurgeComm` masks (winbase.h), as received by IOCTL_SERIAL_PURGE.
 const PURGE_TXABORT: u32 = 0x0001;
@@ -35,9 +41,7 @@ const PURGE_MASK_ALL: u32 = PURGE_TXABORT | PURGE_RXABORT | PURGE_TXCLEAR | PURG
 
 #[inline]
 unsafe fn lock(pc: *mut PairContext) -> KIRQL {
-    let mut irql: KIRQL = 0;
-    KeAcquireSpinLock(&mut (*pc).lock as *mut u64 as *mut KSPIN_LOCK, &mut irql);
-    irql
+    KeAcquireSpinLockRaiseToDpc(&mut (*pc).lock as *mut u64 as *mut KSPIN_LOCK)
 }
 
 #[inline]
@@ -46,7 +50,7 @@ unsafe fn unlock(pc: *mut PairContext, irql: KIRQL) {
 }
 
 unsafe fn read_in<T: Copy>(irp: PIRP, min_len: usize) -> Option<T> {
-    let stack = IoGetCurrentIrpStackLocation(irp);
+    let stack = current_irp_stack_location(irp);
     let in_len = (*stack).Parameters.DeviceIoControl.InputBufferLength as usize;
     if in_len < min_len || mem::size_of::<T>() > in_len {
         return None;
@@ -58,7 +62,7 @@ unsafe fn read_in<T: Copy>(irp: PIRP, min_len: usize) -> Option<T> {
 }
 
 unsafe fn write_out<T: Copy>(irp: PIRP, val: &T) -> usize {
-    let stack = IoGetCurrentIrpStackLocation(irp);
+    let stack = current_irp_stack_location(irp);
     let out_len = (*stack).Parameters.DeviceIoControl.OutputBufferLength as usize;
     let n = mem::size_of::<T>().min(out_len);
     let buf = (*irp).AssociatedIrp.SystemBuffer as *mut u8;
@@ -70,26 +74,25 @@ unsafe fn write_out<T: Copy>(irp: PIRP, val: &T) -> usize {
 fn complete(irp: PIRP, status: NTSTATUS, info: usize) -> NTSTATUS {
     unsafe {
         (*irp).IoStatus.Information = info as u64;
-        (*irp).IoStatus.Status = status;
-        IoCompleteRequest(irp, IO_NO_INCREMENT);
+        (*irp).IoStatus.__bindgen_anon_1.Status = status;
+        IoCompleteRequest(irp, IO_NO_INCREMENT as i8);
     }
     status
 }
 
+/// Dispatch the serial `IOCTL_SERIAL_*` surface.
+///
+/// # Safety
+/// `ext` and `irp` must be the live extension and current IRP of an
+/// `IRP_MJ_DEVICE_CONTROL` dispatch for this device.
 pub unsafe fn dispatch_serial(ext: *mut PortExtension, irp: PIRP) -> NTSTATUS {
     let pc = (*ext).pair_va as *mut PairContext;
-    let stack = IoGetCurrentIrpStackLocation(irp);
+    let stack = current_irp_stack_location(irp);
     let ioctl = (*stack).Parameters.DeviceIoControl.IoControlCode;
     let idx = (*ext).port_index as usize;
 
     if pc.is_null() {
         return complete(irp, wdk_sys::STATUS_DEVICE_NOT_READY, 0);
-    }
-
-    macro_rules! guard {
-        () => {
-            lock(pc)
-        };
     }
 
     match ioctl {
@@ -244,7 +247,7 @@ pub unsafe fn dispatch_serial(ext: *mut PortExtension, irp: PIRP) -> NTSTATUS {
                 status |= SERIAL_CTS_STATE as u32;
             }
             unlock(pc, irql);
-            let mut out: u32 = status;
+            let out: u32 = status;
             let n = write_out(irp, &out);
             complete(irp, wdk_sys::STATUS_SUCCESS, n)
         }
@@ -408,7 +411,7 @@ pub unsafe fn dispatch_serial(ext: *mut PortExtension, irp: PIRP) -> NTSTATUS {
             let irql = lock(pc);
             let m = (*pc).port[idx].wait_mask;
             unlock(pc, irql);
-            let mut out = m;
+            let out = m;
             let n = write_out(irp, &out);
             complete(irp, wdk_sys::STATUS_SUCCESS, n)
         }
@@ -433,15 +436,15 @@ pub unsafe fn dispatch_serial(ext: *mut PortExtension, irp: PIRP) -> NTSTATUS {
             //     Because it is unpublished here, no peer can have dequeued and
             //     completed it, so reading `(*irp).Cancel` is race-free (no
             //     UAF) and the cancelled branch needs no slot ownership check.
-            // VERIFY(eWDK): IoAcquireCancelSpinLock / IoReleaseCancelSpinLock
+            // Both cancel-spinlock functions are generated in wdk_sys::ntddk.
             let mut cancel_irql: KIRQL = 0;
-            wdk_sys::IoAcquireCancelSpinLock(&mut cancel_irql);
+            IoAcquireCancelSpinLock(&mut cancel_irql);
             if (*irp).Cancel != 0 {
-                wdk_sys::IoReleaseCancelSpinLock(cancel_irql);
+                IoReleaseCancelSpinLock(cancel_irql);
                 return complete(irp, wdk_sys::STATUS_CANCELLED, 0);
             }
-            IoSetCancelRoutine(irp, Some(readwrite::cancel_pending_irp));
-            wdk_sys::IoReleaseCancelSpinLock(cancel_irql);
+            set_cancel_routine(irp, Some(readwrite::cancel_pending_irp));
+            IoReleaseCancelSpinLock(cancel_irql);
 
             // (b) Decide under the pair lock. Every branch that completes the
             //     IRP synchronously must first win ownership back with
@@ -455,7 +458,7 @@ pub unsafe fn dispatch_serial(ext: *mut PortExtension, irp: PIRP) -> NTSTATUS {
                 (*pc).port[idx].pending_events = 0;
                 unlock(pc, irql);
                 if readwrite::claim_irp(irp) {
-                    let mut out = out_mask;
+                    let out = out_mask;
                     let n = write_out(irp, &out);
                     complete(irp, wdk_sys::STATUS_SUCCESS, n)
                 } else {
@@ -471,8 +474,8 @@ pub unsafe fn dispatch_serial(ext: *mut PortExtension, irp: PIRP) -> NTSTATUS {
                 }
             } else {
                 // Publish: mark pending first, then make it visible.
-                // VERIFY(eWDK): IoMarkIrpPending
-                wdk_sys::IoMarkIrpPending(irp);
+                // The WDK inline marks the current stack location's Control field.
+                mark_irp_pending(irp);
                 (*pc).port[idx].pending_event_irp = irp as u64;
                 unlock(pc, irql);
                 // Owned by the slot from here on; do not touch it again.
@@ -521,7 +524,7 @@ pub unsafe fn dispatch_serial(ext: *mut PortExtension, irp: PIRP) -> NTSTATUS {
             let irql = lock(pc);
             let out = (*pc).port[idx].modem_control & (SERIAL_DTR_STATE | SERIAL_RTS_STATE) as u32;
             unlock(pc, irql);
-            let mut o = out;
+            let o = out;
             let n = write_out(irp, &o);
             complete(irp, wdk_sys::STATUS_SUCCESS, n)
         }

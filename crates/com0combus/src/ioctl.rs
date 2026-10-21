@@ -4,16 +4,14 @@
 //!   * the user-mode `setupc` tool — CREATE/DELETE/ENUM/GET/SET pair params,
 //!   * the `com0comport` driver — PORT_LINK / PORT_UNLINK.
 
-use core::ptr;
+use core::{ffi::c_void, ptr};
 
-use wdk_sys::{
-    c_void, call_unsafe_wdf_function_binding, nt_success, KSPIN_LOCK, NTSTATUS, WDFQUEUE,
-    WDFREQUEST,
-};
+use wdk::nt_success;
+use wdk_sys::{call_unsafe_wdf_function_binding, KSPIN_LOCK, NTSTATUS, WDFQUEUE, WDFREQUEST};
 
 use crate::bus::{
     self, alloc_pair_context, alloc_pair_slot, find_slot, free_pair_context, free_pair_slot,
-    raw_lock, raw_unlock, BusState, Com0comChildId, PairSlot,
+    raw_lock, raw_unlock, Com0comChildId,
 };
 use com0com_common::{
     ioctls,
@@ -24,7 +22,7 @@ use com0com_common::{
     },
 };
 
-unsafe extern "C" fn evt_io_device_control(
+pub(crate) unsafe extern "C" fn evt_io_device_control(
     _queue: WDFQUEUE,
     request: WDFREQUEST,
     _input_length: usize,
@@ -32,7 +30,12 @@ unsafe extern "C" fn evt_io_device_control(
     ioctl_code: u32,
 ) {
     let (status, info) = dispatch(request, ioctl_code);
-    call_unsafe_wdf_function_binding!(WdfRequestCompleteWithInformation, request, status, info);
+    call_unsafe_wdf_function_binding!(
+        WdfRequestCompleteWithInformation,
+        request,
+        status,
+        info as u64
+    );
 }
 
 unsafe fn dispatch(request: WDFREQUEST, ioctl_code: u32) -> (NTSTATUS, usize) {
@@ -56,7 +59,7 @@ fn retrieve_buffers<'a>(
     unsafe {
         let mut in_buf: *mut c_void = ptr::null_mut();
         let mut out_buf: *mut c_void = ptr::null_mut();
-        // VERIFY: the `*_Retrieve*Buffer` binding signature in your wdk-sys.
+        // WDK bindings take a minimum length, a `PVOID*`, and optional length.
         let s1 = call_unsafe_wdf_function_binding!(
             WdfRequestRetrieveInputBuffer,
             request,
@@ -81,7 +84,8 @@ fn retrieve_buffers<'a>(
 }
 
 unsafe fn create_pair(request: WDFREQUEST) -> (NTSTATUS, usize) {
-    let Some((inb, outb)) = retrieve_buffers(request, core::mem::size_of::<CreatePairRequest>(), 0)
+    let Some((inb, _outb)) =
+        retrieve_buffers(request, core::mem::size_of::<CreatePairRequest>(), 0)
     else {
         return (wdk_sys::STATUS_BUFFER_TOO_SMALL, 0);
     };
@@ -92,15 +96,7 @@ unsafe fn create_pair(request: WDFREQUEST) -> (NTSTATUS, usize) {
     };
 
     let irql = raw_lock(&mut state.lock as *mut _);
-    // Allocate a slot.
-    let mut slot_idx: Option<usize> = None;
-    for i in 0..bus::MAX_PAIRS {
-        if state.slots[i].is_null() {
-            slot_idx = Some(i);
-            break;
-        }
-    }
-    let idx = match slot_idx {
+    let idx = match bus::alloc_slot(&mut *state) {
         Some(i) => i,
         None => {
             raw_unlock(&mut state.lock as *mut _, irql);
@@ -139,7 +135,7 @@ unsafe fn create_pair(request: WDFREQUEST) -> (NTSTATUS, usize) {
             pair_id: req.pair_id,
             port_index,
         };
-        id.header.Size = core::mem::size_of::<Com0comChildId>() as u32;
+        id.header.IdentificationDescriptionSize = core::mem::size_of::<Com0comChildId>() as u32;
         let s = call_unsafe_wdf_function_binding!(
             WdfChildListAddOrUpdateChildDescriptionAsPresent,
             state.child_list,
@@ -182,7 +178,7 @@ unsafe fn delete_pair(request: WDFREQUEST) -> (NTSTATUS, usize) {
         pair_id: req.pair_id,
         port_index: 0,
     };
-    id.header.Size = core::mem::size_of::<Com0comChildId>() as u32;
+    id.header.IdentificationDescriptionSize = core::mem::size_of::<Com0comChildId>() as u32;
     for port_index in 0..2u8 {
         id.port_index = port_index;
         let _ = call_unsafe_wdf_function_binding!(
@@ -208,15 +204,12 @@ unsafe fn enum_pairs(request: WDFREQUEST) -> (NTSTATUS, usize) {
     let irql = raw_lock(&mut state.lock as *mut _);
     let mut resp = EnumPairsResponse::default();
     let mut count = 0u32;
-    for i in 0..bus::MAX_PAIRS {
-        let slot = state.slots[i];
-        if !slot.is_null() {
-            resp.entries[count as usize] = com0com_common::protocol::EnumPairEntry {
-                pair_id: (*slot).pair_id,
-                params: (*slot).params,
-            };
-            count += 1;
-        }
+    for slot in state.slots.iter().copied().filter(|s| !s.is_null()) {
+        resp.entries[count as usize] = com0com_common::protocol::EnumPairEntry {
+            pair_id: (*slot).pair_id,
+            params: (*slot).params,
+        };
+        count += 1;
     }
     resp.count = count;
     raw_unlock(&mut state.lock as *mut _, irql);

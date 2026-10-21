@@ -11,8 +11,11 @@
 use core::ptr;
 
 use wdk_sys::{
-    IoCompleteRequest, IoGetCurrentIrpStackLocation, IoSetCancelRoutine, KeAcquireSpinLock,
-    KeReleaseSpinLock, IO_NO_INCREMENT, KIRQL, KSPIN_LOCK, NTSTATUS, PDEVICE_OBJECT, PIRP,
+    ntddk::{
+        IoAcquireCancelSpinLock, IoReleaseCancelSpinLock, IofCompleteRequest as IoCompleteRequest,
+        KeAcquireSpinLockRaiseToDpc, KeQueryInterruptTimePrecise, KeReleaseSpinLock,
+    },
+    IO_NO_INCREMENT, KIRQL, KSPIN_LOCK, NTSTATUS, PDEVICE_OBJECT, PIRP,
 };
 
 use com0com_common::{
@@ -21,7 +24,9 @@ use com0com_common::{
     pair::PairContext,
 };
 
-use crate::driver::PortExtension;
+use crate::driver::{
+    current_irp_stack_location, mark_irp_pending, set_cancel_routine, PortExtension,
+};
 
 /// Scratch buffer used to corrupt data in place when `emu_noise` is enabled.
 /// Deliberately small: it lives on the (very limited) kernel stack, so large
@@ -29,9 +34,7 @@ use crate::driver::PortExtension;
 const NOISE_CHUNK: usize = 256;
 
 unsafe fn lock_pair(pc: *mut PairContext) -> KIRQL {
-    let mut irql: KIRQL = 0;
-    KeAcquireSpinLock(&mut (*pc).lock as *mut u64 as *mut KSPIN_LOCK, &mut irql);
-    irql
+    KeAcquireSpinLockRaiseToDpc(&mut (*pc).lock as *mut u64 as *mut KSPIN_LOCK)
 }
 
 #[inline]
@@ -44,7 +47,7 @@ unsafe fn unlock_pair(pc: *mut PairContext, irql: KIRQL) {
 /// hangs.**
 ///
 /// `IoCancelIrp` takes the cancel routine (under the cancel spinlock) *before*
-/// dispatching it, so a later `IoSetCancelRoutine(irp, None)` observes `None`
+/// dispatching it, so a later `set_cancel_routine(irp, None)` observes `None`
 /// exactly when cancellation already won. That makes the return value the
 /// single atomic ownership arbiter:
 ///
@@ -60,16 +63,19 @@ unsafe fn unlock_pair(pc: *mut PairContext, irql: KIRQL) {
 /// Must be called after releasing the pair spinlock — the two locks are never
 /// held at the same time.
 ///
-/// VERIFY(eWDK): the return type of `IoSetCancelRoutine` (assumed
-/// `Option<PDRIVER_CANCEL>`; if the binding exposes a bare pointer, swap
-/// `.is_some()` for `!is_null()`).
+/// The generated WDK binding defines `PDRIVER_CANCEL` as
+/// `Option<unsafe extern "C" fn(...)>`, so `.is_some()` is the correct test.
+///
+/// # Safety
+/// `irp` must be a live IRP for this device, and the pair spinlock must not be
+/// held (the two locks are never held at the same time).
 pub unsafe fn claim_irp(irp: PIRP) -> bool {
     let mut cancel_irql: KIRQL = 0;
-    // VERIFY(eWDK): IoAcquireCancelSpinLock
-    wdk_sys::IoAcquireCancelSpinLock(&mut cancel_irql);
-    let prev = IoSetCancelRoutine(irp, None);
-    // VERIFY(eWDK): IoReleaseCancelSpinLock
-    wdk_sys::IoReleaseCancelSpinLock(cancel_irql);
+    // Generated in wdk_sys::ntddk.
+    IoAcquireCancelSpinLock(&mut cancel_irql);
+    let prev = set_cancel_routine(irp, None);
+    // Paired with IoAcquireCancelSpinLock above.
+    IoReleaseCancelSpinLock(cancel_irql);
     prev.is_some()
 }
 
@@ -98,6 +104,9 @@ impl PeerWake {
 /// pick the same IRP up), and the IRPs themselves are completed later by
 /// [`finish_peer_wake`] — completing while holding the pair lock would let the
 /// I/O manager re-enter our dispatch routines with the lock held.
+///
+/// # Safety
+/// `pc` must be a live `PairContext` whose spinlock the caller already holds.
 pub unsafe fn wake_peer_locked(pc: *mut PairContext, idx: usize, delivered: usize) -> PeerWake {
     let peer = 1 - idx;
     if delivered == 0 {
@@ -113,7 +122,7 @@ pub unsafe fn wake_peer_locked(pc: *mut PairContext, idx: usize, delivered: usiz
     // Satisfy a peer pended read if present.
     if (*pc).port[peer].pending_read_irp != 0 {
         let pirp = (*pc).port[peer].pending_read_irp as *mut wdk_sys::IRP;
-        let pstack = IoGetCurrentIrpStackLocation(pirp);
+        let pstack = current_irp_stack_location(pirp);
         let pwant = (*pstack).Parameters.Read.Length as usize;
         let pbuf = (*pirp).AssociatedIrp.SystemBuffer as *mut u8;
         wake.read_len = (*pc).port[peer]
@@ -137,11 +146,15 @@ pub unsafe fn wake_peer_locked(pc: *mut PairContext, idx: usize, delivered: usiz
 
 /// Complete the IRPs collected by [`wake_peer_locked`]. Must be called after
 /// releasing the pair lock.
+///
+/// # Safety
+/// `wake` must come from [`wake_peer_locked`] on this thread and must not have
+/// been finished already.
 pub unsafe fn finish_peer_wake(wake: &PeerWake) {
     if !wake.read_irp.is_null() && claim_irp(wake.read_irp) {
         (*wake.read_irp).IoStatus.Information = wake.read_len as u64;
-        (*wake.read_irp).IoStatus.Status = wdk_sys::STATUS_SUCCESS;
-        IoCompleteRequest(wake.read_irp, IO_NO_INCREMENT);
+        (*wake.read_irp).IoStatus.__bindgen_anon_1.Status = wdk_sys::STATUS_SUCCESS;
+        IoCompleteRequest(wake.read_irp, IO_NO_INCREMENT as i8);
     }
     // else: `cancel_pending_irp` got there first and owns it — leave it alone.
     if !wake.event_irp.is_null() && claim_irp(wake.event_irp) {
@@ -151,8 +164,8 @@ pub unsafe fn finish_peer_wake(wake: &PeerWake) {
             *ev_buf = wake.event_mask;
         }
         (*wake.event_irp).IoStatus.Information = core::mem::size_of::<u32>() as u64;
-        (*wake.event_irp).IoStatus.Status = wdk_sys::STATUS_SUCCESS;
-        IoCompleteRequest(wake.event_irp, IO_NO_INCREMENT);
+        (*wake.event_irp).IoStatus.__bindgen_anon_1.Status = wdk_sys::STATUS_SUCCESS;
+        IoCompleteRequest(wake.event_irp, IO_NO_INCREMENT as i8);
     }
 }
 
@@ -162,21 +175,25 @@ pub unsafe fn finish_peer_wake(wake: &PeerWake) {
 /// throttling the reader as well would need a second timer/DPC (the peer's RX
 /// ring already bounds how much can be delivered). Data is only copied out when
 /// it is already queued.
+///
+/// # Safety
+/// `ext` and `irp` must be the live extension and current IRP of an
+/// `IRP_MJ_READ` dispatch for this device.
 pub unsafe fn handle_read(ext: *mut PortExtension, irp: PIRP) -> NTSTATUS {
     let pc = (*ext).pair_va as *mut PairContext;
     if pc.is_null() {
         (*irp).IoStatus.Information = 0;
-        (*irp).IoStatus.Status = wdk_sys::STATUS_DEVICE_NOT_READY;
-        IoCompleteRequest(irp, IO_NO_INCREMENT);
+        (*irp).IoStatus.__bindgen_anon_1.Status = wdk_sys::STATUS_DEVICE_NOT_READY;
+        IoCompleteRequest(irp, IO_NO_INCREMENT as i8);
         return wdk_sys::STATUS_DEVICE_NOT_READY;
     }
     let idx = (*ext).port_index as usize;
-    let stack = IoGetCurrentIrpStackLocation(irp);
+    let stack = current_irp_stack_location(irp);
     let want = (*stack).Parameters.Read.Length as usize;
     let buf = (*irp).AssociatedIrp.SystemBuffer as *mut u8;
     if buf.is_null() {
-        (*irp).IoStatus.Status = wdk_sys::STATUS_INVALID_PARAMETER;
-        IoCompleteRequest(irp, IO_NO_INCREMENT);
+        (*irp).IoStatus.__bindgen_anon_1.Status = wdk_sys::STATUS_INVALID_PARAMETER;
+        IoCompleteRequest(irp, IO_NO_INCREMENT as i8);
         return wdk_sys::STATUS_INVALID_PARAMETER;
     }
 
@@ -191,18 +208,18 @@ pub unsafe fn handle_read(ext: *mut PortExtension, irp: PIRP) -> NTSTATUS {
     //     so it cannot have been recycled by the I/O manager (no UAF), and no
     //     slot-based ownership check is needed in the cancelled branch — the
     //     IRP is still entirely ours.
-    // VERIFY(eWDK): IoAcquireCancelSpinLock / IoReleaseCancelSpinLock
+    // Both cancel-spinlock functions are generated in wdk_sys::ntddk.
     let mut cancel_irql: KIRQL = 0;
-    wdk_sys::IoAcquireCancelSpinLock(&mut cancel_irql);
+    IoAcquireCancelSpinLock(&mut cancel_irql);
     if (*irp).Cancel != 0 {
-        wdk_sys::IoReleaseCancelSpinLock(cancel_irql);
+        IoReleaseCancelSpinLock(cancel_irql);
         (*irp).IoStatus.Information = 0;
-        (*irp).IoStatus.Status = wdk_sys::STATUS_CANCELLED;
-        IoCompleteRequest(irp, IO_NO_INCREMENT);
+        (*irp).IoStatus.__bindgen_anon_1.Status = wdk_sys::STATUS_CANCELLED;
+        IoCompleteRequest(irp, IO_NO_INCREMENT as i8);
         return wdk_sys::STATUS_CANCELLED;
     }
-    IoSetCancelRoutine(irp, Some(cancel_pending_irp));
-    wdk_sys::IoReleaseCancelSpinLock(cancel_irql);
+    set_cancel_routine(irp, Some(cancel_pending_irp));
+    IoReleaseCancelSpinLock(cancel_irql);
 
     // (b) Decide under the pair lock. From here on another thread may take the
     //     IRP at any moment, so every branch that completes it synchronously
@@ -221,8 +238,8 @@ pub unsafe fn handle_read(ext: *mut PortExtension, irp: PIRP) -> NTSTATUS {
         unlock_pair(pc, irql);
         if claim_irp(irp) {
             (*irp).IoStatus.Information = n as u64;
-            (*irp).IoStatus.Status = wdk_sys::STATUS_SUCCESS;
-            IoCompleteRequest(irp, IO_NO_INCREMENT);
+            (*irp).IoStatus.__bindgen_anon_1.Status = wdk_sys::STATUS_SUCCESS;
+            IoCompleteRequest(irp, IO_NO_INCREMENT as i8);
             wdk_sys::STATUS_SUCCESS
         } else {
             // Cancellation won the race and is completing the IRP right now.
@@ -233,8 +250,8 @@ pub unsafe fn handle_read(ext: *mut PortExtension, irp: PIRP) -> NTSTATUS {
         unlock_pair(pc, irql);
         if claim_irp(irp) {
             (*irp).IoStatus.Information = 0;
-            (*irp).IoStatus.Status = wdk_sys::STATUS_SUCCESS;
-            IoCompleteRequest(irp, IO_NO_INCREMENT);
+            (*irp).IoStatus.__bindgen_anon_1.Status = wdk_sys::STATUS_SUCCESS;
+            IoCompleteRequest(irp, IO_NO_INCREMENT as i8);
             wdk_sys::STATUS_SUCCESS
         } else {
             wdk_sys::STATUS_PENDING
@@ -242,8 +259,8 @@ pub unsafe fn handle_read(ext: *mut PortExtension, irp: PIRP) -> NTSTATUS {
     } else {
         // Publish: mark pending while still holding the pair lock, so the IRP
         // cannot be completed before it is marked (use-after-free).
-        // VERIFY(eWDK): IoMarkIrpPending
-        wdk_sys::IoMarkIrpPending(irp);
+        // The WDK inline marks the current stack location's Control field.
+        mark_irp_pending(irp);
         (*pc).port[idx].pending_read_irp = irp as u64;
         unlock_pair(pc, irql);
         // The IRP is owned by the slot now; do not touch it again.
@@ -262,21 +279,25 @@ pub unsafe fn handle_read(ext: *mut PortExtension, irp: PIRP) -> NTSTATUS {
 /// effective throughput is still the configured baud rate. Staging would need
 /// an extra non-paged buffer plus a DPC per pair, which is a lot of complexity
 /// (and a lot of untestable kernel code) for the same observable behaviour.
+///
+/// # Safety
+/// `ext` and `irp` must be the live extension and current IRP of an
+/// `IRP_MJ_WRITE` dispatch for this device.
 pub unsafe fn handle_write(ext: *mut PortExtension, irp: PIRP) -> NTSTATUS {
     let pc = (*ext).pair_va as *mut PairContext;
     if pc.is_null() {
-        (*irp).IoStatus.Status = wdk_sys::STATUS_DEVICE_NOT_READY;
-        IoCompleteRequest(irp, IO_NO_INCREMENT);
+        (*irp).IoStatus.__bindgen_anon_1.Status = wdk_sys::STATUS_DEVICE_NOT_READY;
+        IoCompleteRequest(irp, IO_NO_INCREMENT as i8);
         return wdk_sys::STATUS_DEVICE_NOT_READY;
     }
     let idx = (*ext).port_index as usize;
     let peer = 1 - idx;
-    let stack = IoGetCurrentIrpStackLocation(irp);
+    let stack = current_irp_stack_location(irp);
     let len = (*stack).Parameters.Write.Length as usize;
     let buf = (*irp).AssociatedIrp.SystemBuffer as *mut u8;
     if buf.is_null() {
-        (*irp).IoStatus.Status = wdk_sys::STATUS_INVALID_PARAMETER;
-        IoCompleteRequest(irp, IO_NO_INCREMENT);
+        (*irp).IoStatus.__bindgen_anon_1.Status = wdk_sys::STATUS_INVALID_PARAMETER;
+        IoCompleteRequest(irp, IO_NO_INCREMENT as i8);
         return wdk_sys::STATUS_INVALID_PARAMETER;
     }
 
@@ -304,8 +325,9 @@ pub unsafe fn handle_write(ext: *mut PortExtension, irp: PIRP) -> NTSTATUS {
     // 1b) Baud-rate emulation (`emu_br`): cap by what the line should have
     //     transmitted since the previous write. `u32::MAX` means "unlimited".
     if params.emu_br != 0 && allowed != 0 {
-        // VERIFY(eWDK): KeQueryInterruptTime (returns 100ns units)
-        let now = wdk_sys::KeQueryInterruptTime() as u64;
+        // KeQueryInterruptTime is a header macro; the generated callable
+        // equivalent is KeQueryInterruptTimePrecise, also returning 100ns units.
+        let now = KeQueryInterruptTimePrecise(ptr::null_mut());
         let lc = (*pc).port[idx].line_control; // [StopBits, Parity, WordLength]
         let half_bits = frame_half_bits(lc[2], lc[1], lc[0]);
         let mut pacer = LinePacer {
@@ -324,8 +346,8 @@ pub unsafe fn handle_write(ext: *mut PortExtension, irp: PIRP) -> NTSTATUS {
         // charged for this — the data was never handed to the line.
         unlock_pair(pc, irql);
         (*irp).IoStatus.Information = 0;
-        (*irp).IoStatus.Status = wdk_sys::STATUS_SUCCESS;
-        IoCompleteRequest(irp, IO_NO_INCREMENT);
+        (*irp).IoStatus.__bindgen_anon_1.Status = wdk_sys::STATUS_SUCCESS;
+        IoCompleteRequest(irp, IO_NO_INCREMENT as i8);
         return wdk_sys::STATUS_SUCCESS;
     }
 
@@ -402,8 +424,8 @@ pub unsafe fn handle_write(ext: *mut PortExtension, irp: PIRP) -> NTSTATUS {
     finish_peer_wake(&wake);
 
     (*irp).IoStatus.Information = written as u64;
-    (*irp).IoStatus.Status = wdk_sys::STATUS_SUCCESS;
-    IoCompleteRequest(irp, IO_NO_INCREMENT);
+    (*irp).IoStatus.__bindgen_anon_1.Status = wdk_sys::STATUS_SUCCESS;
+    IoCompleteRequest(irp, IO_NO_INCREMENT as i8);
     wdk_sys::STATUS_SUCCESS
 }
 
@@ -416,6 +438,9 @@ pub unsafe fn handle_write(ext: *mut PortExtension, irp: PIRP) -> NTSTATUS {
 /// Same ownership protocol as [`cancel_all`]: the slot is cleared under the pair
 /// lock and the IRP is completed afterwards, only if `claim_irp` wins it (a
 /// racing `cancel_pending_irp` may own it instead).
+///
+/// # Safety
+/// `ext` must be a live extension; the pair spinlock must not be held.
 pub unsafe fn cancel_pending_read(ext: *mut PortExtension) {
     let pc = (*ext).pair_va as *mut PairContext;
     if pc.is_null() {
@@ -428,12 +453,15 @@ pub unsafe fn cancel_pending_read(ext: *mut PortExtension) {
     unlock_pair(pc, irql);
     if !read_irp.is_null() && claim_irp(read_irp) {
         (*read_irp).IoStatus.Information = 0;
-        (*read_irp).IoStatus.Status = wdk_sys::STATUS_CANCELLED;
-        IoCompleteRequest(read_irp, IO_NO_INCREMENT);
+        (*read_irp).IoStatus.__bindgen_anon_1.Status = wdk_sys::STATUS_CANCELLED;
+        IoCompleteRequest(read_irp, IO_NO_INCREMENT as i8);
     }
 }
 
 /// Complete any pended read/event IRP for this port (used on cleanup/remove).
+///
+/// # Safety
+/// `ext` must be a live extension; the pair spinlock must not be held.
 pub unsafe fn cancel_all(ext: *mut PortExtension) {
     let pc = (*ext).pair_va as *mut PairContext;
     if pc.is_null() {
@@ -450,13 +478,13 @@ pub unsafe fn cancel_all(ext: *mut PortExtension) {
     // fails, `cancel_pending_irp` was dispatched and is completing the IRP.
     if !read_irp.is_null() && claim_irp(read_irp) {
         (*read_irp).IoStatus.Information = 0;
-        (*read_irp).IoStatus.Status = wdk_sys::STATUS_CANCELLED;
-        IoCompleteRequest(read_irp, IO_NO_INCREMENT);
+        (*read_irp).IoStatus.__bindgen_anon_1.Status = wdk_sys::STATUS_CANCELLED;
+        IoCompleteRequest(read_irp, IO_NO_INCREMENT as i8);
     }
     if !event_irp.is_null() && claim_irp(event_irp) {
         (*event_irp).IoStatus.Information = 0;
-        (*event_irp).IoStatus.Status = wdk_sys::STATUS_CANCELLED;
-        IoCompleteRequest(event_irp, IO_NO_INCREMENT);
+        (*event_irp).IoStatus.__bindgen_anon_1.Status = wdk_sys::STATUS_CANCELLED;
+        IoCompleteRequest(event_irp, IO_NO_INCREMENT as i8);
     }
 }
 
@@ -471,12 +499,16 @@ pub unsafe fn cancel_all(ext: *mut PortExtension) {
 /// only unlinked for tidiness, it is *not* the ownership token (see
 /// [`claim_irp`]). Any racing path will see `IoSetCancelRoutine` return `None`
 /// and leave the IRP to us.
+///
+/// # Safety
+/// Invoked by the I/O manager with the cancel spinlock held; `device` and
+/// `irp` must be the live device object and IRP being cancelled.
 pub unsafe extern "C" fn cancel_pending_irp(device: PDEVICE_OBJECT, irp: PIRP) {
     let ext = (*device).DeviceExtension as *mut PortExtension;
     let pc = (*ext).pair_va as *mut PairContext;
     let idx = (*ext).port_index as usize;
     // Release the cancel spinlock the I/O manager holds before doing work.
-    wdk_sys::IoReleaseCancelSpinLock((*irp).CancelIrql);
+    IoReleaseCancelSpinLock((*irp).CancelIrql);
 
     // Unlink from whichever slot owns it so no other path picks it up. We do
     // *not* decide ownership from the slot: a racing writer may have cleared it
@@ -492,6 +524,6 @@ pub unsafe extern "C" fn cancel_pending_irp(device: PDEVICE_OBJECT, irp: PIRP) {
 
     // We were dispatched, so we are the only completer.
     (*irp).IoStatus.Information = 0;
-    (*irp).IoStatus.Status = wdk_sys::STATUS_CANCELLED;
-    IoCompleteRequest(irp, IO_NO_INCREMENT);
+    (*irp).IoStatus.__bindgen_anon_1.Status = wdk_sys::STATUS_CANCELLED;
+    IoCompleteRequest(irp, IO_NO_INCREMENT as i8);
 }

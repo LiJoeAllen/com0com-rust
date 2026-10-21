@@ -6,9 +6,12 @@
 //!   * an instance ID encoding the pair id + port role, which the port driver
 //!     reads back to locate its `PairContext`.
 
+use core::ptr;
+
+use wdk::nt_success;
 use wdk_sys::{
-    call_unsafe_wdf_function_binding, nt_success, NTSTATUS, UNICODE_STRING, WDFCHILDLIST,
-    WDFDEVICE, WDFDEVICE_INIT,
+    call_unsafe_wdf_function_binding, NTSTATUS, PWDFDEVICE_INIT,
+    PWDF_CHILD_IDENTIFICATION_DESCRIPTION_HEADER, UNICODE_STRING, WDFCHILDLIST, WDFDEVICE,
 };
 
 use crate::bus::Com0comChildId;
@@ -26,31 +29,18 @@ unsafe fn ascii_to_unicode(ascii: &[u8], buf: &mut [u16]) -> UNICODE_STRING {
     }
 }
 
-unsafe extern "C" fn evt_child_list_create_device(
-    child_list: WDFCHILDLIST,
-    device_init: *mut WDFDEVICE_INIT,
+pub(crate) unsafe extern "C" fn evt_child_list_create_device(
+    _child_list: WDFCHILDLIST,
+    identification_description: PWDF_CHILD_IDENTIFICATION_DESCRIPTION_HEADER,
+    mut device_init: PWDFDEVICE_INIT,
 ) -> NTSTATUS {
-    // Recover (pair_id, port_index) from the child identification description.
-    let mut id = Com0comChildId {
-        header: wdk_sys::WDF_CHILD_IDENTIFICATION_DESCRIPTION_HEADER::default(),
-        pair_id: 0,
-        port_index: 0,
-    };
-    id.header.Size = core::mem::size_of::<Com0comChildId>() as u32;
-
-    let mut info = wdk_sys::WDF_CHILD_RETRIEVE_INFO::default();
-    info.Size = core::mem::size_of::<wdk_sys::WDF_CHILD_RETRIEVE_INFO>() as u32;
-    info.IdentificationDescription.Size = core::mem::size_of::<Com0comChildId>() as u32;
-
-    let status = call_unsafe_wdf_function_binding!(
-        WdfChildListRetrieveIdentificationDescription,
-        child_list,
-        &mut info,
-        &mut id as *mut Com0comChildId as *mut wdk_sys::WDF_CHILD_IDENTIFICATION_DESCRIPTION_HEADER
-    );
-    if !nt_success(status) {
-        return wdk_sys::STATUS_INVALID_DEVICE_REQUEST;
+    if identification_description.is_null() {
+        return wdk_sys::STATUS_INVALID_PARAMETER;
     }
+
+    // The framework passes the exact child-description bytes supplied to
+    // WdfChildListAddOrUpdateChildDescriptionAsPresent.
+    let id = &*(identification_description as *const Com0comChildId);
 
     let hw_id = if id.port_index == 0 {
         PORT_A_HW_ID
@@ -101,7 +91,7 @@ unsafe extern "C" fn evt_child_list_create_device(
         return status;
     }
 
-    let mut pdo: WDFDEVICE = wdk_sys::WDF_NO_HANDLE;
+    let mut pdo: WDFDEVICE = ptr::null_mut();
     let status = call_unsafe_wdf_function_binding!(
         WdfDeviceCreate,
         &mut device_init,
