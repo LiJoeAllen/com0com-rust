@@ -11,5 +11,11 @@ target/
 *.exe
 *.pdb
 
+# 本地调试/崩溃分析产物（根目录；验证流程的日志应留在 target/）
+/*.log
+/*.dmp
+/crash-analyze.txt
+/probe_*.txt
+
 # 本地 Agent 记忆（.agent/memory，不入版本库；.agent/knowledge 与 .agent/skills 需入库）
 .agent/memory/
