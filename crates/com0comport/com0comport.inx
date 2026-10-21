@@ -10,19 +10,26 @@ ClassGuid   = {4D36E978-E325-11CE-BFC1-08002BE10318}
 Provider    = %ManufacturerName%
 CatalogFile = com0comport.cat
 DriverVer   = 10/20/2026,0.1.0.0
+PnpLockdown = 1
 
 [DestinationDirs]
-DefaultDestDir = 12 ; %SystemRoot%\System32\drivers
+DefaultDestDir = 13 ; DriverStore (universal INF requirement)
 
 [Manufacturer]
-%ManufacturerName% = Com0comPort, NTamd64
+%ManufacturerName% = Com0comPort, NTamd64.10.0...16299
 
-[Com0comPort.NTamd64]
+[Com0comPort.NTamd64.10.0...16299]
 %PortADescription% = Com0comPort_Install, COM0COM\PORT_A
 %PortBDescription% = Com0comPort_Install, COM0COM\PORT_B
 
+[Com0comPort_Install.NTamd64]
+CopyFiles = Com0comPort_CopyFiles
+
 [Com0comPort_Install.NTamd64.Services]
 AddService = com0comport, 0x00000002, Com0comPort_Service
+
+[Com0comPort_CopyFiles]
+com0comport.sys
 
 [Com0comPort_Install.NTamd64.HW]
 AddReg = Com0comPort_HW_AddReg
@@ -34,9 +41,16 @@ AddReg = Com0comPort_HW_AddReg
 ServiceType    = 1   ; SERVICE_KERNEL_DRIVER
 StartType      = 3   ; SERVICE_DEMAND_START
 ErrorControl   = 1   ; SERVICE_ERROR_NORMAL
-ServiceBinary  = %12%\com0comport.sys
+ServiceBinary  = %13%\com0comport.sys
+
+[SourceDisksNames]
+1 = %DiskName%,,,""
+
+[SourceDisksFiles]
+com0comport.sys = 1,,
 
 [Strings]
 ManufacturerName = "JoeAllen"
 PortADescription = "com0com Port A (Rust)"
 PortBDescription = "com0com Port B (Rust)"
+DiskName         = "com0comport Installation Media"

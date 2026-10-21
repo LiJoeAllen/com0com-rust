@@ -7,12 +7,12 @@
 //! one place removes the duplicated copies that used to live in
 //! `com0combus/src/pdo.rs` and `com0comport/src/comname.rs`.
 
-/// Max bytes for an instance ID buffer (`"c0c0_<hex8>_<A|B>"` plus NUL).
+/// Max bytes for an instance ID buffer (`"c0c0_<hex8><A|B>"` plus NUL).
 pub const INSTANCE_ID_MAX: usize = 32;
 /// Max bytes for a compatible ID buffer (same shape, roomier prefix slot).
 pub const COMPAT_ID_MAX: usize = 48;
 
-/// Write the ASCII instance/compatible ID `"c0c0_<hex8>_<role>"` into `out`.
+/// Write the ASCII instance/compatible ID `"c0c0_<hex8><role>"` into `out`.
 ///
 /// `role` is typically `b'A'` or `b'B'`. Returns the number of bytes written
 /// (not counting any trailing NUL the caller may append). If `out` is too small
@@ -43,7 +43,7 @@ pub fn build_instance_id(out: &mut [u8], pair_id: u32, role: u8) -> usize {
     i
 }
 
-/// Compatible ID has the same shape as the instance ID (`"c0c0_<hex8>_<A|B>"`);
+/// Compatible ID has the same shape as the instance ID (`"c0c0_<hex8><A|B>"`);
 /// `port_index` 0 maps to `A`, 1 maps to `B`.
 pub fn build_compat_id(out: &mut [u8], pair_id: u32, port_index: u8) -> usize {
     let role = if port_index == 0 { b'A' } else { b'B' };

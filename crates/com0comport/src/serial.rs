@@ -382,7 +382,8 @@ pub unsafe fn dispatch_serial(ext: *mut PortExtension, irp: PIRP) -> NTSTATUS {
                 if (mask & PURGE_MASK_ALL) != 0 {
                     let irql = lock(pc);
                     if (mask & PURGE_RXCLEAR) != 0 {
-                        (*pc).port[idx].rx = com0com_common::pair::RingBuffer::new();
+                        // 就地清空，避免 16 KiB 的栈上临时值。
+                        (*pc).port[idx].rx.clear();
                         // Drop the "data waiting" event bits too, otherwise the
                         // next WAIT_ON_MASK would report RXCHAR for a buffer we
                         // just emptied.
@@ -516,7 +517,8 @@ pub unsafe fn dispatch_serial(ext: *mut PortExtension, irp: PIRP) -> NTSTATUS {
         }
         ioctls::IOCTL_SERIAL_RESET_DEVICE => {
             let irql = lock(pc);
-            (*pc).port[idx].rx = com0com_common::pair::RingBuffer::new();
+            // 就地清空，避免 16 KiB 的栈上临时值。
+            (*pc).port[idx].rx.clear();
             unlock(pc, irql);
             complete(irp, wdk_sys::STATUS_SUCCESS, 0)
         }

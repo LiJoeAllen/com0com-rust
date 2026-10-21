@@ -19,7 +19,8 @@ use windows_sys::Win32::Devices::DeviceAndDriverInstallation::{
     SP_DEVICE_INTERFACE_DATA, SP_DEVICE_INTERFACE_DETAIL_DATA_W,
 };
 use windows_sys::Win32::Foundation::{
-    CloseHandle, GetLastError, GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE,
+    CloseHandle, GetLastError, ERROR_INSUFFICIENT_BUFFER, GENERIC_READ, GENERIC_WRITE, HANDLE,
+    INVALID_HANDLE_VALUE,
 };
 use windows_sys::Win32::Storage::FileSystem::{CreateFileW, FILE_ATTRIBUTE_NORMAL, OPEN_EXISTING};
 use windows_sys::Win32::System::IO::{DeviceIoControl, OVERLAPPED};
@@ -39,6 +40,14 @@ fn to_wide(s: &str) -> Vec<u16> {
     let mut v: Vec<u16> = s.encode_utf16().collect();
     v.push(0);
     v
+}
+
+/// Diagnostic trace, enabled by setting the `COM0COM_TRACE` environment
+/// variable. Writes to stderr so normal command output stays parseable.
+fn trace(msg: &str) {
+    if std::env::var_os("COM0COM_TRACE").is_some() {
+        eprintln!("[setupc] {msg}");
+    }
 }
 
 fn wide_buf_to_string(buf: &[u16]) -> String {
@@ -80,6 +89,7 @@ unsafe fn from_bytes<T: Copy>(buf: &[u8]) -> T {
 
 /// Return the device path of the first present `GUID_COM0COM_BUS` interface.
 fn bus_device_path() -> Result<String, String> {
+    trace("bus_device_path: enter");
     let guid = guid_from_bytes(&GUID_COM0COM_BUS_BYTES);
     let hdev: HDEVINFO = unsafe {
         SetupDiGetClassDevsW(
@@ -97,6 +107,7 @@ fn bus_device_path() -> Result<String, String> {
         }));
     }
 
+    trace("bus_device_path: class devs ok");
     let mut didata: SP_DEVICE_INTERFACE_DATA = unsafe { zeroed() };
     didata.cbSize = size_of::<SP_DEVICE_INTERFACE_DATA>() as u32;
 
@@ -109,21 +120,37 @@ fn bus_device_path() -> Result<String, String> {
         ));
     }
 
-    // First call: learn the required buffer size.
+    trace("bus_device_path: interface enumerated");
+    // 第一次调用：查询设备路径所需缓冲区大小，预期以 ERROR_INSUFFICIENT_BUFFER 失败。
     let mut required: u32 = 0;
-    unsafe {
+    let probe_ok = unsafe {
         SetupDiGetDeviceInterfaceDetailW(hdev, &didata, null_mut(), 0, &mut required, null_mut())
     };
-
-    let mut buf: Vec<u8> = vec![0u8; required as usize];
-    let detail = buf.as_mut_ptr() as *mut SP_DEVICE_INTERFACE_DETAIL_DATA_W;
-    // Documented fixed-part size for the W variant: sizeof(DWORD)+sizeof(WCHAR).
-    unsafe {
-        (*detail).cbSize = (size_of::<u32>() + size_of::<u16>()) as u32;
+    let probe_err = unsafe { GetLastError() };
+    if probe_ok != 0 || probe_err != ERROR_INSUFFICIENT_BUFFER || required == 0 {
+        unsafe { SetupDiDestroyDeviceInfoList(hdev) };
+        return Err(format!(
+            "SetupDiGetDeviceInterfaceDetailW size probe failed (Win32 {}, required {})",
+            probe_err, required
+        ));
     }
+
+    // 用 usize 元素分配，保证缓冲区满足 SP_DEVICE_INTERFACE_DETAIL_DATA_W 的对齐要求。
+    let words = (required as usize + size_of::<usize>() - 1) / size_of::<usize>();
+    let mut buf: Vec<usize> = vec![0; words];
+    let detail = buf.as_mut_ptr() as *mut SP_DEVICE_INTERFACE_DETAIL_DATA_W;
+    // cbSize 取文档规定的固定部分大小：x64 为 8（含对齐填充），x86 为 6。
+    let detail_cb_size: u32 = if size_of::<usize>() == 8 { 8 } else { 6 };
+    unsafe {
+        (*detail).cbSize = detail_cb_size;
+    }
+    trace(&format!(
+        "bus_device_path: size probe ok, required={required}"
+    ));
     let ok = unsafe {
         SetupDiGetDeviceInterfaceDetailW(hdev, &didata, detail, required, null_mut(), null_mut())
     };
+    trace(&format!("bus_device_path: detail ok={ok}"));
     let path = if ok != 0 {
         unsafe {
             let path_ptr = &(*detail).DevicePath as *const u16;
@@ -150,6 +177,7 @@ fn bus_device_path() -> Result<String, String> {
 /// access IOCTLs).
 fn open_bus() -> Result<HANDLE, String> {
     let path = bus_device_path()?;
+    trace(&format!("open_bus: path={path}"));
     let wide = to_wide(&path);
     let handle = unsafe {
         CreateFileW(
@@ -169,6 +197,7 @@ fn open_bus() -> Result<HANDLE, String> {
             unsafe { GetLastError() }
         ));
     }
+    trace("open_bus: handle open");
     Ok(handle)
 }
 
@@ -195,6 +224,11 @@ fn close_bus(h: HANDLE) {
 /// Thin, SAFE wrapper around `DeviceIoControl`. All `unsafe` (the FFI call and
 /// the raw pointer casts) is confined here; callers never write `unsafe`.
 fn ioctl(handle: HANDLE, code: u32, in_buf: &[u8], out_buf: &mut [u8]) -> Result<u32, u32> {
+    trace(&format!(
+        "ioctl: code=0x{code:08x} in={} out={}",
+        in_buf.len(),
+        out_buf.len()
+    ));
     let mut bytes_returned: u32 = 0;
     let ok = unsafe {
         DeviceIoControl(
@@ -217,8 +251,11 @@ fn ioctl(handle: HANDLE, code: u32, in_buf: &[u8], out_buf: &mut [u8]) -> Result
         )
     };
     if ok == 0 {
-        Err(unsafe { GetLastError() })
+        let err = unsafe { GetLastError() };
+        trace(&format!("ioctl: failed win32={err}"));
+        Err(err)
     } else {
+        trace(&format!("ioctl: ok bytes={bytes_returned}"));
         Ok(bytes_returned)
     }
 }

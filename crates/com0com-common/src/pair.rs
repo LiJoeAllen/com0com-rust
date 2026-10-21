@@ -129,6 +129,14 @@ impl RingBuffer {
     pub fn is_empty(&self) -> bool {
         self.available_to_read() == 0
     }
+
+    /// 就地清空。不要用 `*rb = RingBuffer::new()` 代替：那会先在栈上构造
+    /// 16 KiB 的临时值，内核栈放不下。
+    pub fn clear(&mut self) {
+        self.head = 0;
+        self.tail = 0;
+        self.data.fill(0);
+    }
 }
 
 impl Default for RingBuffer {

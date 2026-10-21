@@ -11,7 +11,7 @@ use wdk_sys::{
 };
 
 use com0com_common::{
-    pair::{PairContext, PortState},
+    pair::{PairContext, DEFAULT_RNG_SEED, RING_BUFFER_SIZE, RING_CAPACITY},
     protocol::Com0comPairParams,
 };
 
@@ -20,6 +20,12 @@ pub const COM0COM_TAG: u32 = u32::from_le_bytes(*b"c0c0"); // pool tag
 
 /// WDF child identification description. Carries (pair_id, port_index) so the
 /// PDO create callback knows which port to spawn.
+///
+/// KMDF compares the whole `IdentificationDescriptionSize` block with
+/// `RtlCompareMemory` (no compare callback is registered), so every byte —
+/// including the 3 bytes of tail padding — must be deterministic. Always build
+/// this with `core::mem::zeroed()` instead of a struct literal, otherwise the
+/// uninitialized padding makes removal lookups fail with STATUS_NO_SUCH_DEVICE.
 #[repr(C)]
 pub struct Com0comChildId {
     pub header: wdk_sys::WDF_CHILD_IDENTIFICATION_DESCRIPTION_HEADER,
@@ -35,6 +41,7 @@ pub struct PairSlot {
     pub pair_va: u64, // *mut PairContext
     pub params: Com0comPairParams,
     pub child_present: [bool; 2], // A, B currently present in the child list
+    pub deleted: bool,            // DELETE_PAIR seen: hidden from ENUM, rejects new links
     pub ref_count: i32,           // ports currently linked via PORT_LINK
 }
 
@@ -146,12 +153,19 @@ pub unsafe fn alloc_pair_context(pair_id: u32) -> *mut PairContext {
     pc.ref_count = 0;
     pc.deleting = 0;
     pc.params = Com0comPairParams::new();
-    // Start both ports from the canonical defaults instead of raw zeros: a
-    // zeroed `PortState` has `rx_buffer_size` / `tx_buffer_size` / `queue_limit`
-    // == 0 (the write path would then accept *no* bytes) and `rng_state` == 0
-    // (xorshift32 degenerates to an all-zero stream).
-    pc.port[0] = PortState::new();
-    pc.port[1] = PortState::new();
+    // 就地补上非零默认值；绝不能再写 `pc.port[0] = PortState::new()`。
+    // 每个 PortState 约 16 KiB（内含一个 RingBuffer），赋值语句会先在栈上
+    // 构造 16 KiB 的临时值。本函数在 DISPATCH_LEVEL 的内核栈上执行
+    // （KMDF 设备锁把 IOCTL 回调抬到 IRQL 2），v8 的 0x0A 崩溃正是
+    // `_chkstk` 在 `alloc_pair_context` 里探测新栈页。
+    // 清零已由上面的 write_bytes 完成，这里只写非零字段：
+    // 零值会让写路径一个字节都收不下（queue_limit == 0）且 xorshift32 退化。
+    for port in pc.port.iter_mut() {
+        port.rx_buffer_size = RING_BUFFER_SIZE as u32;
+        port.tx_buffer_size = RING_BUFFER_SIZE as u32;
+        port.queue_limit = RING_CAPACITY as u32;
+        port.rng_state = DEFAULT_RNG_SEED;
+    }
     KeInitializeSpinLock(&mut pc.lock as *mut u64 as *mut KSPIN_LOCK);
     ptr as *mut PairContext
 }

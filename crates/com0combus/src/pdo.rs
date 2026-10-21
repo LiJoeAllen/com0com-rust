@@ -41,7 +41,6 @@ pub(crate) unsafe extern "C" fn evt_child_list_create_device(
     // The framework passes the exact child-description bytes supplied to
     // WdfChildListAddOrUpdateChildDescriptionAsPresent.
     let id = &*(identification_description as *const Com0comChildId);
-
     let hw_id = if id.port_index == 0 {
         PORT_A_HW_ID
     } else {
@@ -49,6 +48,17 @@ pub(crate) unsafe extern "C" fn evt_child_list_create_device(
     };
     let mut hw_buf = [0u16; 64];
     let hw_uni = ascii_to_unicode(hw_id.as_bytes(), &mut hw_buf);
+
+    // 缺少 DeviceID 时 PnP 查询 BusQueryDeviceID 失败，子设备节点不会被创建。
+    let status = call_unsafe_wdf_function_binding!(
+        WdfPdoInitAssignDeviceID,
+        device_init,
+        &hw_uni as *const UNICODE_STRING
+    );
+    if !nt_success(status) {
+        return status;
+    }
+
     let status = call_unsafe_wdf_function_binding!(
         WdfPdoInitAddHardwareID,
         device_init,

@@ -29,9 +29,7 @@ panic = "abort"
 [profile.release]
 panic = "abort"
 
-# NOTE: crates.io only ships KMDF bindings. For a WDM driver you must clone
-# windows-drivers-rs and configure wdk-sys for the WDM config (see README),
-# then point this crate at the local path dependency. The `driver-type`
-# metadata below is honored by that configuration.
+# crates.io 的 wdk-sys 只预生成 KMDF bindings；在装有 WDK 的机器上，
+# wdk-build 会按此元数据用 WDK 头文件重新生成 WDM bindings（需要 libclang 18–20，见 README）。
 [package.metadata.wdk.driver-model]
 driver-type = "WDM"

@@ -5,7 +5,7 @@ use wdk_sys::{
         IoDeleteDevice, IoDetachDevice, IofCallDriver as IoCallDriver,
         IofCompleteRequest as IoCompleteRequest,
     },
-    IO_NO_INCREMENT, IRP_MN_REMOVE_DEVICE, NTSTATUS, PDEVICE_OBJECT, PIRP,
+    IO_NO_INCREMENT, IRP_MN_REMOVE_DEVICE, IRP_MN_SURPRISE_REMOVAL, NTSTATUS, PDEVICE_OBJECT, PIRP,
 };
 
 use crate::{
@@ -59,7 +59,18 @@ pub(crate) unsafe extern "C" fn dispatch_pnp(device: PDEVICE_OBJECT, irp: PIRP) 
     let ext = (*device).DeviceExtension as *mut PortExtension;
     let stack = current_irp_stack_location(irp);
     let minor = (*stack).MinorFunction;
-    if u32::from(minor) == IRP_MN_REMOVE_DEVICE {
+    let minor_u32 = u32::from(minor);
+    if minor_u32 == IRP_MN_REMOVE_DEVICE || minor_u32 == IRP_MN_SURPRISE_REMOVAL {
+        // 先完成本端挂起的 IRP，再归还 PORT_LINK 引用：UNLINK 之后总线可能
+        // 立即释放 PairContext，迟到的读写/取消路径再碰它就是 UAF。
+        readwrite::cancel_all(ext);
+        // 归还 PORT_LINK 引用。缺少这一步时总线上的 ref_count 永远不会归零，
+        // PairContext 与 pair 槽位会一直泄漏（`setupc remove` 后端口仍可用）。
+        // unlink_from_bus 会先清零 pair_va 再发请求，后续请求直接拿到
+        // STATUS_DEVICE_NOT_READY。
+        crate::driver::unlink_from_bus(ext);
+    }
+    if minor_u32 == IRP_MN_REMOVE_DEVICE {
         copy_current_irp_stack_location_to_next(irp);
         set_completion_routine(
             irp,

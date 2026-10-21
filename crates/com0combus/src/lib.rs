@@ -14,6 +14,14 @@
 
 extern crate wdk_panic; // provides the kernel panic handler
 
+/// Kernel debug output (captured by DebugView / a kernel debugger).
+/// 只能在 unsafe 上下文中调用（DbgPrint 是外部 C 函数）。
+macro_rules! klog {
+    ($s:literal $(, $a:expr)* $(,)?) => {
+        wdk_sys::ntddk::DbgPrint(concat!($s, "\n\0").as_ptr().cast() $(, $a)*)
+    };
+}
+
 use wdk_alloc::WdkAllocator;
 
 #[global_allocator]

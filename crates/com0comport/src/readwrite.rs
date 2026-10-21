@@ -510,6 +510,15 @@ pub unsafe extern "C" fn cancel_pending_irp(device: PDEVICE_OBJECT, irp: PIRP) {
     // Release the cancel spinlock the I/O manager holds before doing work.
     IoReleaseCancelSpinLock((*irp).CancelIrql);
 
+    // 设备移除会先把 pair_va 清零再发 UNLINK；此时仍可能有挂起 IRP 被取消，
+    // 不能再解引用 PairContext，直接按取消完成。
+    if pc.is_null() {
+        (*irp).IoStatus.Information = 0;
+        (*irp).IoStatus.__bindgen_anon_1.Status = wdk_sys::STATUS_CANCELLED;
+        IoCompleteRequest(irp, IO_NO_INCREMENT as i8);
+        return;
+    }
+
     // Unlink from whichever slot owns it so no other path picks it up. We do
     // *not* decide ownership from the slot: a racing writer may have cleared it
     // first, in which case that writer sees `IoSetCancelRoutine` return `None`

@@ -20,8 +20,8 @@ use wdk_sys::{
     PDRIVER_OBJECT, PIO_COMPLETION_ROUTINE, PIO_STACK_LOCATION, PIRP, PZZWSTR, UNICODE_STRING,
 };
 
-use com0com_common::ioctls::IOCTL_COM0COM_PORT_LINK;
-use com0com_common::protocol::{PortLinkRequest, PortLinkResponse};
+use com0com_common::ioctls::{IOCTL_COM0COM_PORT_LINK, IOCTL_COM0COM_PORT_UNLINK};
+use com0com_common::protocol::{PortLinkRequest, PortLinkResponse, PortUnlinkRequest};
 
 use crate::{comname, dispatch};
 
@@ -262,9 +262,13 @@ unsafe fn parse_compat_ids(wide: *const u16, len_bytes: usize) -> Option<(u32, u
             if !ok {
                 return None;
             }
-            // role char after the 8 hex digits + '_'
-            let role = wide.add(i + 5 + 8 + 1).read() as u8;
-            let idx = if role == b'A' { 0u8 } else { 1u8 };
+            // role char follows the 8 hex digits directly (`c0c0_<hex8><A|B>`)
+            let role = wide.add(i + 5 + 8).read() as u8;
+            let idx = match role {
+                b'A' => 0u8,
+                b'B' => 1u8,
+                _ => return None,
+            };
             return Some((pair_id, idx));
         }
         // skip to next null-terminated string
@@ -276,9 +280,9 @@ unsafe fn parse_compat_ids(wide: *const u16, len_bytes: usize) -> Option<(u32, u
     None
 }
 
-/// Open the bus control device interface and issue PORT_LINK to fetch the
-/// shared `PairContext` VA.
-unsafe fn link_to_bus(pair_id: u32, port_index: u8) -> u64 {
+/// Resolve the bus control device interface to a device object.
+/// Returns `(file_obj, dev_obj)`; the caller must `ObfDereferenceObject` the file.
+unsafe fn open_bus_device() -> Option<(*mut wdk_sys::FILE_OBJECT, PDEVICE_OBJECT)> {
     let mut iface: PZZWSTR = ptr::null_mut();
     let guid = crate::comname::bus_guid();
     let status = IoGetDeviceInterfaces(
@@ -288,7 +292,7 @@ unsafe fn link_to_bus(pair_id: u32, port_index: u8) -> u64 {
         &mut iface,
     );
     if !nt_success(status) || iface.is_null() || *iface == 0 {
-        return 0;
+        return None;
     }
 
     let mut iface_len = 0usize;
@@ -310,34 +314,37 @@ unsafe fn link_to_bus(pair_id: u32, port_index: u8) -> u64 {
     );
     ExFreePool(iface as wdk_sys::PVOID);
     if !nt_success(status) || file_obj.is_null() || dev_obj.is_null() {
-        return 0;
+        return None;
     }
+    Some((file_obj, dev_obj))
+}
 
-    let req = PortLinkRequest {
-        pair_id,
-        port_index,
-    };
-    let mut in_buf = req;
-    let mut out_buf = PortLinkResponse { pair_va: 0 };
-
+/// Send a synchronous METHOD_BUFFERED control request to the bus.
+unsafe fn send_bus_control(
+    dev_obj: PDEVICE_OBJECT,
+    ioctl: u32,
+    in_ptr: *mut core::ffi::c_void,
+    in_len: u32,
+    out_ptr: *mut core::ffi::c_void,
+    out_len: u32,
+) -> NTSTATUS {
     let mut event = core::mem::zeroed::<wdk_sys::KEVENT>();
     KeInitializeEvent(&mut event, wdk_sys::_EVENT_TYPE::NotificationEvent, 0);
     let mut iosb = core::mem::zeroed::<IO_STATUS_BLOCK>();
 
     let irp = IoBuildDeviceIoControlRequest(
-        IOCTL_COM0COM_PORT_LINK,
+        ioctl,
         dev_obj,
-        &mut in_buf as *mut _ as *mut core::ffi::c_void,
-        core::mem::size_of::<PortLinkRequest>() as u32,
-        &mut out_buf as *mut _ as *mut core::ffi::c_void,
-        core::mem::size_of::<PortLinkResponse>() as u32,
+        in_ptr,
+        in_len,
+        out_ptr,
+        out_len,
         0, // InternalDeviceControl = FALSE (IRP_MJ_DEVICE_CONTROL)
         &mut event as *mut wdk_sys::KEVENT,
         &mut iosb as *mut IO_STATUS_BLOCK,
     );
     if irp.is_null() {
-        ObfDereferenceObject(file_obj as wdk_sys::PVOID);
-        return 0;
+        return wdk_sys::STATUS_INSUFFICIENT_RESOURCES;
     }
     let status = IofCallDriver(dev_obj, irp);
     if status == wdk_sys::STATUS_PENDING {
@@ -349,11 +356,63 @@ unsafe fn link_to_bus(pair_id: u32, port_index: u8) -> u64 {
             ptr::null_mut(),
         );
     }
-    let final_status = iosb.__bindgen_anon_1.Status;
+    iosb.__bindgen_anon_1.Status
+}
+
+/// Open the bus control device interface and issue PORT_LINK to fetch the
+/// shared `PairContext` VA.
+unsafe fn link_to_bus(pair_id: u32, port_index: u8) -> u64 {
+    let Some((file_obj, dev_obj)) = open_bus_device() else {
+        return 0;
+    };
+
+    let mut in_buf = PortLinkRequest {
+        pair_id,
+        port_index,
+    };
+    let mut out_buf = PortLinkResponse { pair_va: 0 };
+    let status = send_bus_control(
+        dev_obj,
+        IOCTL_COM0COM_PORT_LINK,
+        &mut in_buf as *mut _ as *mut core::ffi::c_void,
+        core::mem::size_of::<PortLinkRequest>() as u32,
+        &mut out_buf as *mut _ as *mut core::ffi::c_void,
+        core::mem::size_of::<PortLinkResponse>() as u32,
+    );
     ObfDereferenceObject(file_obj as wdk_sys::PVOID);
-    if nt_success(final_status) {
+    if nt_success(status) {
         out_buf.pair_va
     } else {
         0
     }
+}
+
+/// Drop the PORT_LINK reference. Called on device removal; the bus frees the
+/// `PairContext` and its slot once both ports have unlinked.
+pub(crate) unsafe fn unlink_from_bus(ext: *mut PortExtension) {
+    let pair_va = (*ext).pair_va;
+    if pair_va == 0 {
+        return;
+    }
+    // 先断开本端的指针，再让总线释放上下文。总线在最后一个 UNLINK 到达时
+    // 会立即 ExFreePool，若此处仍保留旧指针，移除过程中的读写/取消会把
+    // 已释放的内存当成 PairContext 使用。
+    (*ext).pair_va = 0;
+    let Some((file_obj, dev_obj)) = open_bus_device() else {
+        return;
+    };
+    let mut in_buf = PortUnlinkRequest {
+        pair_id: (*ext).pair_id,
+        port_index: (*ext).port_index,
+        pair_va,
+    };
+    let _ = send_bus_control(
+        dev_obj,
+        IOCTL_COM0COM_PORT_UNLINK,
+        &mut in_buf as *mut _ as *mut core::ffi::c_void,
+        core::mem::size_of::<PortUnlinkRequest>() as u32,
+        ptr::null_mut(),
+        0,
+    );
+    ObfDereferenceObject(file_obj as wdk_sys::PVOID);
 }
