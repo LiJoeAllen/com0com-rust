@@ -14,14 +14,12 @@
 #>
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory = $true)]
-    [string]$VmxPath,
+    # 以下三个连接参数可只写在 .env.local，命令行显式传参优先。
+    [string]$VmxPath = '',
 
-    [Parameter(Mandatory = $true)]
-    [string]$GuestUser,
+    [string]$GuestUser = '',
 
-    [Parameter(Mandatory = $true)]
-    [string]$GuestPassword,
+    [string]$GuestPassword = '',
 
     # 指定时先关机回滚快照再启动；快照必须处于关机状态。
     [string]$SnapshotName = '',
@@ -41,27 +39,55 @@ param(
 
     [switch]$SkipReboot,
 
-    [int]$BootTimeoutSec = 300,
+    # 冷启动 / 快照回滚后的首次启动可能超过 5 分钟，默认留足 10 分钟。
+    [int]$BootTimeoutSec = 600,
 
     [int]$Jobs = 2
 )
 
 $ErrorActionPreference = 'Stop'
 
-# 未显式传参时回落到环境变量（可用 tools/load-env.ps1 从 .env / .env.local 加载）。
-if (-not $VmxPath        -and $env:VMRUN_VMX_PATH)        { $VmxPath        = $env:VMRUN_VMX_PATH }
-if (-not $GuestUser      -and $env:VMRUN_GUEST_USER)      { $GuestUser      = $env:VMRUN_GUEST_USER }
-if (-not $GuestPassword  -and $env:VMRUN_GUEST_PASSWORD)  { $GuestPassword  = $env:VMRUN_GUEST_PASSWORD }
-if (-not $SnapshotName   -and $env:VMRUN_SNAPSHOT_NAME)   { $SnapshotName   = $env:VMRUN_SNAPSHOT_NAME }
-if (-not $VmrunPath      -and $env:VMRUN_PATH)            { $VmrunPath      = $env:VMRUN_PATH }
-if (-not $PackageDir     -and $env:VM_TEST_PACKAGE_DIR)   { $PackageDir     = $env:VM_TEST_PACKAGE_DIR }
-if (-not $ResultsDir     -and $env:VM_TEST_RESULTS_DIR)   { $ResultsDir     = $env:VM_TEST_RESULTS_DIR }
-# Jobs/Configuration 始终有非空默认值，只在环境未改过默认值时采用环境变量。
-if ($Jobs -eq 2          -and $env:VM_TEST_JOBS)          { $Jobs           = [int]$env:VM_TEST_JOBS }
-$vmTestConfiguration = $env:VM_TEST_CONFIGURATION
-if ($PSBoundParameters.ContainsKey('Configuration')) { $vmTestConfiguration = $Configuration }
-if ($vmTestConfiguration) { $Configuration = $vmTestConfiguration }
+# load-env.ps1 是 dot-source，会覆盖当前作用域的 $PSBoundParameters，
+# 因此先记下哪些参数是命令行显式传入的。
+$explicit = @{}
+foreach ($name in 'VmxPath', 'GuestUser', 'GuestPassword', 'SnapshotName', 'Configuration',
+    'PackageDir', 'ResultsDir', 'GuestDir', 'VmrunPath', 'BootTimeoutSec', 'Jobs') {
+    $explicit[$name] = $PSBoundParameters.ContainsKey($name)
+}
+
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
+
+# 自动加载 .env / .env.local，让新克隆的机器填完值就能直接跑。
+$envLoader = Join-Path $repo 'tools\load-env.ps1'
+if (Test-Path -LiteralPath $envLoader) { . $envLoader -Quiet }
+
+# 优先级：命令行显式传参 > .env.local > 已有环境变量 > .env > 脚本默认值。
+if (-not $explicit.VmxPath        -and $env:VMRUN_VMX_PATH)        { $VmxPath        = $env:VMRUN_VMX_PATH }
+if (-not $explicit.GuestUser      -and $env:VMRUN_GUEST_USER)      { $GuestUser      = $env:VMRUN_GUEST_USER }
+if (-not $explicit.GuestPassword  -and $env:VMRUN_GUEST_PASSWORD)  { $GuestPassword  = $env:VMRUN_GUEST_PASSWORD }
+if (-not $explicit.SnapshotName   -and $env:VMRUN_SNAPSHOT_NAME)   { $SnapshotName   = $env:VMRUN_SNAPSHOT_NAME }
+if (-not $explicit.VmrunPath      -and $env:VMRUN_PATH)            { $VmrunPath      = $env:VMRUN_PATH }
+if (-not $explicit.PackageDir     -and $env:VM_TEST_PACKAGE_DIR)   { $PackageDir     = $env:VM_TEST_PACKAGE_DIR }
+if (-not $explicit.ResultsDir     -and $env:VM_TEST_RESULTS_DIR)   { $ResultsDir     = $env:VM_TEST_RESULTS_DIR }
+if (-not $explicit.GuestDir       -and $env:VM_TEST_GUEST_DIR)     { $GuestDir       = $env:VM_TEST_GUEST_DIR }
+if (-not $explicit.Configuration  -and $env:VM_TEST_CONFIGURATION) { $Configuration  = $env:VM_TEST_CONFIGURATION }
+if (-not $explicit.BootTimeoutSec -and $env:VM_TEST_BOOT_TIMEOUT_SEC) {
+    $BootTimeoutSec = [int]$env:VM_TEST_BOOT_TIMEOUT_SEC
+}
+if (-not $explicit.Jobs) {
+    if ($env:VM_TEST_JOBS) { $Jobs = [int]$env:VM_TEST_JOBS }
+    elseif ($env:CARGO_BUILD_JOBS) { $Jobs = [int]$env:CARGO_BUILD_JOBS }
+}
+
+if (-not $VmxPath)       { throw '缺少测试虚拟机：请传 -VmxPath，或在 .env.local 中设置 VMRUN_VMX_PATH。' }
+if (-not $GuestUser)     { throw '缺少客户机账号：请传 -GuestUser，或在 .env.local 中设置 VMRUN_GUEST_USER。' }
+if (-not $GuestPassword) { throw '缺少客户机口令：请传 -GuestPassword，或在 .env.local 中设置 VMRUN_GUEST_PASSWORD。' }
+if ($Configuration -notin @('debug', 'release')) {
+    throw "无效的构建配置：$Configuration（只支持 debug / release）"
+}
+if ($BootTimeoutSec -lt 1) { throw "BootTimeoutSec 必须是正整数：$BootTimeoutSec" }
+if ($Jobs -lt 1) { throw "Jobs 必须是正整数：$Jobs" }
+
 $GuestPowerShell = 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe'
 
 if (-not (Test-Path $VmxPath)) { throw "找不到虚拟机: $VmxPath" }

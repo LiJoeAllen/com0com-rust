@@ -8,11 +8,18 @@
 # 并禁止包内的 [dependencies]/[build-dependencies]/[dev-dependencies] 直接
 # 写版本号（必须用 workspace = true 或本地 path）。
 #
-# 用法：powershell -NoProfile -ExecutionPolicy Bypass -File tools/check-deps.ps1
-# 退出码：0 = 一致；1 = 存在漂移或未集中管理的依赖。
+# 用法：
+#   powershell -NoProfile -ExecutionPolicy Bypass -File tools/check-deps.ps1
+#   powershell -NoProfile -ExecutionPolicy Bypass -File tools/check-deps.ps1 -Fix
+#
+# -Fix 把两个驱动清单的 [workspace.package] 同名字段、[workspace.dependencies]
+# 中已登记的第三方条目，以及 Makefile.toml 内嵌的 wdk-build 版本，重写为根
+# Cargo.toml 中的值；本地 path 依赖与驱动未使用的依赖不会被增删。
+# 退出码：0 = 一致（或已同步为一致）；1 = 存在漂移或未集中管理的依赖。
 # ---------------------------------------------------------------------------
 param(
-    [string]$RepoRoot = ''
+    [string]$RepoRoot = '',
+    [switch]$Fix
 )
 
 $ErrorActionPreference = 'Stop'
@@ -150,6 +157,149 @@ function Read-DependencySections {
     return ,$entries
 }
 
+# 读取 [workspace.package] 的字符串字段（version / edition / license 等）。
+function Read-WorkspacePackageValues {
+    param([string]$Manifest)
+
+    $values = @{}
+    $inSection = $false
+    foreach ($line in [System.IO.File]::ReadAllLines($Manifest)) {
+        $trim = $line.Trim()
+        if ($trim -match '^\[(.+?)\]$') {
+            $inSection = ($Matches[1] -eq 'workspace.package')
+            continue
+        }
+        if (-not $inSection) { continue }
+        if ($trim -match '^([A-Za-z0-9_-]+)\s*=\s*"([^"]*)"') {
+            $values[$Matches[1]] = $Matches[2]
+        }
+    }
+    return $values
+}
+
+# 读取 [workspace.dependencies] 中每个声明的行区间（0 基，End 含）。
+function Read-WorkspaceDependencyBlocks {
+    param([string]$Manifest)
+
+    $lines = [System.IO.File]::ReadAllLines($Manifest)
+    $blocks = @{}
+    $inSection = $false
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        $line = $lines[$i].Trim()
+        if ($line -match '^\[(.+?)\]$') {
+            $inSection = ($Matches[1] -eq 'workspace.dependencies')
+            continue
+        }
+        if (-not $inSection -or $line -eq '' -or $line.StartsWith('#')) { continue }
+        if ($line -notmatch '^([A-Za-z0-9_-]+)\s*=\s*(.+)$') { continue }
+
+        # 先保存匹配结果：下面的循环还会执行 -notmatch，会覆盖 $Matches。
+        $name = $Matches[1]
+        $value = $Matches[2].Trim()
+        $end = $i
+        if ($value.StartsWith('{') -and $value -notmatch '}') {
+            while ($end + 1 -lt $lines.Count -and $lines[$end] -notmatch '}') { $end++ }
+            if ($lines[$end] -notmatch '}') {
+                throw "${Manifest}:$($i + 1) 内联依赖表缺少右花括号"
+            }
+        }
+        $blocks[$name] = @{ Start = $i; End = $end }
+        $i = $end
+    }
+    return $blocks
+}
+
+# 按原文件的行尾与 BOM 风格写回，避免 -Fix 产生无关 diff。
+function Write-ManifestText {
+    param([string]$Manifest, [string]$Text)
+
+    $bytes = [System.IO.File]::ReadAllBytes($Manifest)
+    $hasBom = ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF)
+    [System.IO.File]::WriteAllText($Manifest, $Text, (New-Object System.Text.UTF8Encoding -ArgumentList $hasBom))
+}
+
+# 把单个清单同步为根值；返回是否有改动。
+function Sync-Manifest {
+    param(
+        [string]$Manifest,
+        [hashtable]$RootPackage,
+        [string[]]$RootDependencyLines,
+        [hashtable]$RootDependencyBlocks,
+        [hashtable]$Canonical,
+        [System.Collections.ArrayList]$Changes
+    )
+
+    $lines = [System.Collections.Generic.List[string]]::new()
+    $lines.AddRange([string[]][System.IO.File]::ReadAllLines($Manifest))
+    $modified = $false
+
+    # [workspace.package]：只同步两边都存在的键，不新增字段。
+    $inSection = $false
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        $line = $lines[$i]
+        $trim = $line.Trim()
+        if ($trim -match '^\[(.+?)\]$') {
+            $inSection = ($Matches[1] -eq 'workspace.package')
+            continue
+        }
+        if (-not $inSection) { continue }
+        if ($trim -match '^([A-Za-z0-9_-]+)\s*=\s*"([^"]*)"') {
+            $key = $Matches[1]
+            $old = $Matches[2]
+            if ($RootPackage.ContainsKey($key) -and $RootPackage[$key] -ne $old) {
+                $new = $RootPackage[$key]
+                $q1 = $line.IndexOf('"')
+                $q2 = $line.LastIndexOf('"')
+                $lines[$i] = $line.Substring(0, $q1 + 1) + $new + $line.Substring($q2)
+                [void]$Changes.Add("${Manifest}: [workspace.package] $key = `"$old`" -> `"$new`"")
+                $modified = $true
+            }
+        }
+    }
+
+    # [workspace.dependencies]：整条声明替换为根声明。从后往前处理，
+    # 避免前面的行号因增删行而漂移。
+    $blocks = Read-WorkspaceDependencyBlocks -Manifest $Manifest
+    $ordered = $blocks.Keys | Sort-Object { $blocks[$_].Start } -Descending
+    foreach ($name in $ordered) {
+        if (-not $Canonical.ContainsKey($name) -or -not $RootDependencyBlocks.ContainsKey($name)) { continue }
+        $start = $blocks[$name].Start
+        $count = $blocks[$name].End - $start + 1
+        $rootBlock = $RootDependencyBlocks[$name]
+        $replacement = @($RootDependencyLines[$rootBlock.Start..$rootBlock.End])
+        if (($lines.GetRange($start, $count) -join "`n") -eq ($replacement -join "`n")) { continue }
+        $lines.RemoveRange($start, $count)
+        $lines.InsertRange($start, [string[]]$replacement)
+        [void]$Changes.Add("${Manifest}: [workspace.dependencies] $name 同步为根声明")
+        $modified = $true
+    }
+
+    if (-not $modified) { return }
+
+    $bytes = [System.IO.File]::ReadAllBytes($Manifest)
+    $text = [System.Text.Encoding]::UTF8.GetString($bytes)
+    $eol = if ($text.Contains("`r`n")) { "`r`n" } else { "`n" }
+    $output = $lines -join $eol
+    if ($text.EndsWith("`n")) { $output += $eol }
+    Write-ManifestText -Manifest $Manifest -Text $output
+}
+
+# cargo-make 的 load_script 内嵌了独立的 wdk-build 依赖，也同步为根版本。
+function Sync-MakefileVersion {
+    param([string]$Manifest, [string]$Version, [System.Collections.ArrayList]$Changes)
+
+    $bytes = [System.IO.File]::ReadAllBytes($Manifest)
+    $text = [System.Text.Encoding]::UTF8.GetString($bytes)
+    $updated = [regex]::Replace($text, '(wdk-build\s*=\s*")[^"]+(")', {
+        param($match)
+        $match.Groups[1].Value + $Version + $match.Groups[2].Value
+    })
+    if ($updated -eq $text) { return }
+
+    Write-ManifestText -Manifest $Manifest -Text $updated
+    [void]$Changes.Add("${Manifest}: 内嵌 wdk-build 版本同步为 `"$Version`"")
+}
+
 $manifests | ForEach-Object {
     if (-not (Test-Path -LiteralPath $_.Path)) {
         throw "找不到清单：$($_.Path)"
@@ -172,9 +322,62 @@ if ($canonical.Count -eq 0) {
     throw '根 Cargo.toml 的 [workspace.dependencies] 中没有找到第三方依赖。'
 }
 
+$canonicalWdkBuild = $canonical['wdk-build'] -replace '^version=', ''
+$rootPath = $manifests[0].Path
+$rootPackageValues = Read-WorkspacePackageValues -Manifest $rootPath
+
+if ($Fix) {
+    $rootLines = [System.IO.File]::ReadAllLines($rootPath)
+    $rootBlocks = Read-WorkspaceDependencyBlocks -Manifest $rootPath
+    $changes = New-Object System.Collections.ArrayList
+
+    foreach ($m in $manifests) {
+        if ($m.Name -eq 'root') { continue }
+        Sync-Manifest -Manifest $m.Path -RootPackage $rootPackageValues `
+            -RootDependencyLines $rootLines -RootDependencyBlocks $rootBlocks `
+            -Canonical $canonical -Changes $changes
+    }
+
+    if ($canonical['wdk-build'] -eq "version=$canonicalWdkBuild") {
+        foreach ($mf in $makefiles) {
+            if (Test-Path -LiteralPath $mf.Path) {
+                Sync-MakefileVersion -Manifest $mf.Path -Version $canonicalWdkBuild -Changes $changes
+            }
+        }
+    }
+
+    if ($changes.Count -gt 0) {
+        Write-Host "[check-deps] 已同步 $($changes.Count) 处：" -ForegroundColor Yellow
+        foreach ($change in $changes) { Write-Host "  - $change" }
+        # 重新读取，按修复后的内容做一致性校验。
+        $byManifest = @{}
+        foreach ($m in $manifests) {
+            $byManifest[$m.Name] = Read-DependencySections -Manifest $m.Path
+        }
+    }
+    else {
+        Write-Host '[check-deps] 无需同步：驱动清单与 Makefile.toml 已与根一致。'
+    }
+}
+
 $errors = New-Object System.Collections.ArrayList
 
-$canonicalWdkBuild = $canonical['wdk-build'] -replace '^version=', ''
+# [workspace.package]：三个 workspace 根必须声明同一组元数据。
+foreach ($m in $manifests) {
+    if ($m.Name -eq 'root') { continue }
+    $values = Read-WorkspacePackageValues -Manifest $m.Path
+    foreach ($key in $rootPackageValues.Keys) {
+        if (-not $values.ContainsKey($key)) {
+            [void]$errors.Add("$($m.Name): [workspace.package] 缺少 $key（根为 `"$($rootPackageValues[$key])`"）")
+        }
+        elseif ($values[$key] -ne $rootPackageValues[$key]) {
+            [void]$errors.Add(
+                "$($m.Name): [workspace.package] $key = `"$($values[$key])`" 与根值 `"$($rootPackageValues[$key])`" 不一致"
+            )
+        }
+    }
+}
+
 foreach ($mf in $makefiles) {
     if (-not (Test-Path -LiteralPath $mf.Path)) {
         [void]$errors.Add("$($mf.Name): 找不到文件")

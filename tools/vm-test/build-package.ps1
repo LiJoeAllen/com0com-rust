@@ -12,8 +12,8 @@
         <OutputDir>\WDRLocalTestCert.cer
         <OutputDir>\SHA256SUMS.txt
 
-    构建环境（WDK / libclang / SDK include）按仓库根 README 配置；
-    脚本只负责设一个安全的并行度，避免低配机编译内核 crate 时卡死。
+    构建环境（WDK / libclang / SDK include）由仓库根的 .env / .env.local 提供，
+    脚本会自动加载；命令行显式传参仍然优先。
 #>
 [CmdletBinding()]
 param(
@@ -22,18 +22,48 @@ param(
 
     [string]$OutputDir = '',
 
-    # 不指定时在 Windows Kits\10\Tools\*\x64 下自动查找。
+    # 不指定时先读 DEVCON_PATH，再在 Windows Kits\10\Tools\*\x64 下自动查找。
     [string]$DevconPath = '',
 
-    # 内核 crate 首次 bindgen 很吃 CPU；固定小并行度。
+    # 内核 crate 首次 bindgen 很吃 CPU；默认 2，可由 VM_TEST_JOBS /
+    # CARGO_BUILD_JOBS 覆盖。
     [int]$Jobs = 2
 )
 
 $ErrorActionPreference = 'Stop'
+
+# load-env.ps1 是 dot-source，会覆盖当前作用域的 $PSBoundParameters，
+# 因此先记下哪些参数是命令行显式传入的。
+$configurationExplicit = $PSBoundParameters.ContainsKey('Configuration')
+$outputExplicit = $PSBoundParameters.ContainsKey('OutputDir')
+$devconExplicit = $PSBoundParameters.ContainsKey('DevconPath')
+$jobsExplicit = $PSBoundParameters.ContainsKey('Jobs')
+
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repo = (Resolve-Path (Join-Path $scriptDir '..\..')).Path
+
+# 自动加载 .env / .env.local，让新克隆的机器填完值就能直接跑。
+$envLoader = Join-Path $repo 'tools\load-env.ps1'
+if (Test-Path -LiteralPath $envLoader) { . $envLoader -Quiet }
+
+if (-not $configurationExplicit -and $env:VM_TEST_CONFIGURATION) {
+    $Configuration = $env:VM_TEST_CONFIGURATION
+}
+if ($Configuration -notin @('debug', 'release')) {
+    throw "无效的构建配置：$Configuration（只支持 debug / release）"
+}
+
+if (-not $outputExplicit -and $env:VM_TEST_PACKAGE_DIR) { $OutputDir = $env:VM_TEST_PACKAGE_DIR }
 if (-not $OutputDir) { $OutputDir = Join-Path $repo 'target\vm-test-package' }
 $OutputDir = [System.IO.Path]::GetFullPath($OutputDir)
+
+if (-not $devconExplicit -and $env:DEVCON_PATH) { $DevconPath = $env:DEVCON_PATH }
+
+if (-not $jobsExplicit) {
+    if ($env:VM_TEST_JOBS) { $Jobs = [int]$env:VM_TEST_JOBS }
+    elseif ($env:CARGO_BUILD_JOBS) { $Jobs = [int]$env:CARGO_BUILD_JOBS }
+}
+if ($Jobs -lt 1) { throw "Jobs 必须是正整数：$Jobs" }
 
 function Step([string]$message) {
     Write-Host "==> $message" -ForegroundColor Cyan
@@ -96,20 +126,32 @@ Step "构建配置: $Configuration（CARGO_BUILD_JOBS=$Jobs）"
 $env:CARGO_BUILD_JOBS = "$Jobs"
 
 # Git Bash/MSYS 环境的 PATH 里常带有同名的第三方 signtool（如 msys64\mingw64\bin），
-# 会遮蔽 WDK/SDK 的 signtool 并让 cargo-wdk 签名失败。注意 signtool 只随 Windows SDK
-# 的版本化 bin 目录发布（WDK 自身的 bin\<ver> 不含它），所以要选**含有 signtool.exe**
-# 的最新版本目录前置。
-if ($env:WDKContentRoot) {
+# 会遮蔽 WDK/SDK 的 signtool 并让 cargo-wdk 签名失败。优先使用 WDK_BIN_PATH；
+# 未指定时选**含有 signtool.exe** 的最新版本目录前置（signtool 只随 Windows SDK
+# 的版本化 bin 目录发布，WDK 自身的 bin\<ver> 不含它）。
+$signtoolDir = ''
+if ($env:WDK_BIN_PATH) {
+    if (Test-Path -LiteralPath (Join-Path $env:WDK_BIN_PATH 'signtool.exe')) {
+        $signtoolDir = $env:WDK_BIN_PATH
+    }
+    else {
+        Write-Warning "WDK_BIN_PATH 下没有 signtool.exe：$($env:WDK_BIN_PATH)"
+    }
+}
+if (-not $signtoolDir -and $env:WDKContentRoot) {
     $versionedBins = Get-ChildItem -Path (Join-Path $env:WDKContentRoot 'bin') -Directory -ErrorAction SilentlyContinue |
         Where-Object { $_.Name -match '^\d+(\.\d+)+' } |
         Sort-Object { [version]$_.Name } -Descending
     foreach ($bin in $versionedBins) {
         $dir = Join-Path $bin.FullName 'x64'
         if ((Test-Path $dir) -and (Test-Path (Join-Path $dir 'signtool.exe'))) {
-            $env:PATH = "$dir;$env:PATH"
+            $signtoolDir = $dir
             break
         }
     }
+}
+if ($signtoolDir -and (($env:PATH -split ';') -notcontains $signtoolDir)) {
+    $env:PATH = "$signtoolDir;$env:PATH"
 }
 
 if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {

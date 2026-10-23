@@ -24,9 +24,10 @@
 - PKF 是单文件知识产物，放在 `pkf/`，可直接复制到其他项目复用。
 
 ## 环境配置
-新机器 clone 后按仓库根 `.env` 补齐本机路径与凭据即可运行，详见
-[brain/wiki/environment.md](./brain/wiki/environment.md)（加载器：`tools/load-env.ps1` /
-`tools/load-env.sh`；私密值写 `.env.local`，已 gitignore）。
+新机器 clone 后按仓库根 `.env` 补齐本机路径与凭据即可运行；`tools/vm-test/` 下的脚本
+会**自动加载** `.env` / `.env.local`，直接跑 `cargo` 时再手动 dot-source
+（`tools/load-env.ps1` / `tools/load-env.sh`）。私密值写 `.env.local`（已 gitignore）。
+完整变量清单与路径解析规则见 [brain/wiki/environment.md](./brain/wiki/environment.md)。
 
 ## 构建与 workspace 布局（先读，否则会踩坑）
 仓库有**三个** workspace 根（根 + `crates/com0combus` + `crates/com0comport`），

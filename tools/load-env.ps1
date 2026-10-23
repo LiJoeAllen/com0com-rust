@@ -24,7 +24,8 @@
 #>
 param(
     [string]$RepoRoot = '',
-    [switch]$Print
+    [switch]$Print,
+    [switch]$Quiet
 )
 
 $ErrorActionPreference = 'Stop'
@@ -45,6 +46,13 @@ function Resolve-RepoPath([string]$Value) {
     return $Value
 }
 
+# 输出目录（测试包、测试结果）可能尚不存在，不能用 Test-Path 判断；
+# 相对值一律按仓库根锚定。
+function Resolve-RepoOutputPath([string]$Value) {
+    if ($Value -match '^([A-Za-z]:[\\/]|/)') { return $Value }
+    return ((Join-Path $RepoRoot $Value) -replace '\\', '/')
+}
+
 # BINDGEN_EXTRA_CLANG_ARGS 按空白切分，把每个 -I 的目标路径做同样的锚定
 #（该变量不允许含空格路径，见 .env 说明，因此按空白切分是安全的）。
 function Resolve-BindgenArgs([string]$Value) {
@@ -62,8 +70,13 @@ function Resolve-BindgenArgs([string]$Value) {
 
 function Set-EnvValue([string]$Name, [string]$Value) {
     switch -Exact ($Name) {
-        'LIBCLANG_PATH'          { $Value = Resolve-RepoPath $Value }
-        'WDKContentRoot'         { $Value = Resolve-RepoPath $Value }
+        'LIBCLANG_PATH'            { $Value = Resolve-RepoPath $Value }
+        'WDKContentRoot'           { $Value = Resolve-RepoPath $Value }
+        'DEVCON_PATH'              { $Value = Resolve-RepoPath $Value }
+        'WDK_BIN_PATH'             { $Value = Resolve-RepoPath $Value }
+        'VMRUN_PATH'               { $Value = Resolve-RepoPath $Value }
+        'VM_TEST_PACKAGE_DIR'      { $Value = Resolve-RepoOutputPath $Value }
+        'VM_TEST_RESULTS_DIR'      { $Value = Resolve-RepoOutputPath $Value }
         'BINDGEN_EXTRA_CLANG_ARGS' { $Value = Resolve-BindgenArgs $Value }
     }
     Set-Item -LiteralPath "Env:$Name" -Value $Value
@@ -112,9 +125,22 @@ foreach ($entry in @(@{ File = '.env'; Force = $false },
 
 if ($Print) {
     foreach ($key in $effective.Keys) {
-        Write-Host ("{0}={1}" -f $key, $effective[$key])
+        $shown = $effective[$key]
+        if ($key -eq 'VMRUN_GUEST_PASSWORD') { $shown = '***' }
+        Write-Host ("{0}={1}" -f $key, $shown)
     }
 }
-else {
+elseif (-not $Quiet) {
     Write-Host "[load-env] 已从 .env / .env.local 加载环境变量。" -ForegroundColor Green
+}
+
+# signtool 必须压过 Git Bash / MSYS PATH 里的同名第三方程序（它会报
+# "unrecognized option: sign"）。auto-detect 由 build-package.ps1 负责。
+if ($env:WDK_BIN_PATH -and -not $Print) {
+    if (-not (Test-Path -LiteralPath (Join-Path $env:WDK_BIN_PATH 'signtool.exe'))) {
+        Write-Warning "WDK_BIN_PATH 下没有 signtool.exe：$($env:WDK_BIN_PATH)"
+    }
+    elseif (($env:PATH -split ';') -notcontains $env:WDK_BIN_PATH) {
+        $env:PATH = "$($env:WDK_BIN_PATH);$env:PATH"
+    }
 }

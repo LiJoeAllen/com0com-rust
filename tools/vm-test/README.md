@@ -17,10 +17,15 @@ tools\vm-test\
 ### 构建机
 - Windows + **WDK 10.0.28000** + **Windows SDK 10.0.26100**；
 - Rust stable + `cargo-wdk`（`cargo install cargo-wdk`）；
-- libclang 18–20，且按根 [README](../../README.md) 配好：
+- libclang 18–20，按根 [README](../../README.md) 配好：
   - `LIBCLANG_PATH`
   - `BINDGEN_EXTRA_CLANG_ARGS`（补 SDK 的 `shared`/`ucrt`/`um` include 路径）
-- `devcon.exe`（WDK Tools 自带；通过 `-DevconPath` 指定，或在 `Windows Kits\10\Tools\*\x64\` 下自动查找）。
+- `devcon.exe`（WDK Tools 自带；通过 `DEVCON_PATH` / `-DevconPath` 指定，或在 `Windows Kits\10\Tools\*\x64\` 下自动查找）。
+- 含 `signtool.exe` 的 SDK bin 目录会被自动前置到 `PATH`；也可用 `WDK_BIN_PATH` 显式指定，
+  避免 Git Bash/MSYS 的同名 `signtool` 抢先命中。
+
+> 以上路径与凭据都可以写在仓库根的 `.env.local`（模板见 `.env`）。本目录的两个脚本
+> **会自动加载** `.env` / `.env.local`，命令行显式传参仍然优先。
 
 ### 测试虚拟机
 - VMware Workstation + VMware Tools；
@@ -41,12 +46,17 @@ tools\vm-test\
 ## 1. 构建测试包
 
 ```powershell
+# 配好 .env.local 后可直接运行（DEVCON_PATH 等也已在其中）
+powershell -ExecutionPolicy Bypass -File tools\vm-test\build-package.ps1
+
+# 需要临时覆盖时用命令行传参
 powershell -ExecutionPolicy Bypass -File tools\vm-test\build-package.ps1 `
-  -Configuration debug `
+  -Configuration release `
   -DevconPath 'C:\Program Files (x86)\Windows Kits\10\Tools\10.0.26100.0\x64\devcon.exe'
 ```
 
-产物在 `target\vm-test-package\`：
+`-DevconPath` 可省略（回落 `DEVCON_PATH` 或自动查找）；`-OutputDir` 可省略
+（回落 `VM_TEST_PACKAGE_DIR` 或 `target\vm-test-package`）。产物默认在 `target\vm-test-package\`：
 
 ```
 bus\com0combus.inf|sys|cat
@@ -57,12 +67,16 @@ WDRLocalTestCert.cer
 SHA256SUMS.txt
 ```
 
-脚本会依次构建 `setupc`、`com0combus`、`com0comport`，并固定 `CARGO_BUILD_JOBS=2`，
-避免低配机因并行编译内核 crate 而卡死。
+脚本会依次构建 `setupc`、`com0combus`、`com0comport`；并行度默认 2
+（`-Jobs` / `VM_TEST_JOBS` / `CARGO_BUILD_JOBS` 依次覆盖），避免低配机因并行编译内核 crate 而卡死。
 
 ## 2. 执行验证
 
 ```powershell
+# .env.local 填好 VMRUN_* 后，直接运行（默认先构建测试包）
+powershell -ExecutionPolicy Bypass -File tools\vm-test\run-vm-test.ps1
+
+# 连接参数仍可用命令行覆盖
 powershell -ExecutionPolicy Bypass -File tools\vm-test\run-vm-test.ps1 `
   -VmxPath 'F:\VMs\com0com-test\com0com-test.vmx' `
   -GuestUser '<客户机用户名>' `
@@ -70,20 +84,20 @@ powershell -ExecutionPolicy Bypass -File tools\vm-test\run-vm-test.ps1 `
   -SnapshotName clean
 ```
 
-| 参数 | 必填 | 说明 |
-|---|---|---|
-| `-VmxPath` | 是 | 测试虚拟机 `.vmx` 路径 |
-| `-GuestUser` / `-GuestPassword` | 是 | 客户机管理员凭据（vmrun 使用） |
-| `-SnapshotName` | 否 | 指定时先关机回滚快照再启动；快照必须处于关机状态 |
-| `-Configuration` | 否 | `debug`（默认）或 `release` |
-| `-PackageDir` | 否 | 默认 `target\vm-test-package` |
-| `-ResultsDir` | 否 | 默认 `target\vm-test-results\<时间戳>` |
-| `-GuestDir` | 否 | 客户机工作目录，默认 `C:\com0com-vmtest` |
-| `-VmrunPath` | 否 | 默认从 PATH 或 `Program Files\VMware\VMware Workstation` 查找 |
-| `-SkipBuild` | 否 | 跳过构建，直接使用现有测试包 |
-| `-SkipReboot` | 否 | 安装后不重启（默认重启，确保新驱动重新加载） |
-| `-BootTimeoutSec` | 否 | 等待客户机就绪的超时，默认 300 秒 |
-| `-Jobs` | 否 | 传给 cargo 的 `CARGO_BUILD_JOBS`，默认 2 |
+| 参数 | 必填 | 环境变量回落 | 说明 |
+|---|---|---|---|
+| `-VmxPath` | 环境或参数 | `VMRUN_VMX_PATH` | 测试虚拟机 `.vmx` 路径 |
+| `-GuestUser` / `-GuestPassword` | 环境或参数 | `VMRUN_GUEST_USER` / `VMRUN_GUEST_PASSWORD` | 客户机管理员凭据（vmrun 使用） |
+| `-SnapshotName` | 否 | `VMRUN_SNAPSHOT_NAME` | 指定时先关机回滚快照再启动；快照必须处于关机状态 |
+| `-Configuration` | 否 | `VM_TEST_CONFIGURATION` | `debug`（默认）或 `release` |
+| `-PackageDir` | 否 | `VM_TEST_PACKAGE_DIR` | 默认 `target\vm-test-package` |
+| `-ResultsDir` | 否 | `VM_TEST_RESULTS_DIR` | 默认 `target\vm-test-results\<时间戳>` |
+| `-GuestDir` | 否 | `VM_TEST_GUEST_DIR` | 客户机工作目录，默认 `C:\com0com-vmtest` |
+| `-VmrunPath` | 否 | `VMRUN_PATH` | 默认从 PATH 或 `Program Files\VMware\VMware Workstation` 查找 |
+| `-SkipBuild` | 否 | — | 跳过构建，直接使用现有测试包 |
+| `-SkipReboot` | 否 | — | 安装后不重启（默认重启，确保新驱动重新加载） |
+| `-BootTimeoutSec` | 否 | `VM_TEST_BOOT_TIMEOUT_SEC` | 等待客户机就绪的超时，默认 600 秒（冷启动可能超过 5 分钟） |
+| `-Jobs` | 否 | `VM_TEST_JOBS` → `CARGO_BUILD_JOBS` | 传给 cargo 的 `CARGO_BUILD_JOBS`，默认 2 |
 
 指定 `-SnapshotName` 时，如果虚拟机正在运行，脚本会先 `vmrun stop ... hard`
 再回滚（测试 VM 的运行状态会被丢弃），这是推荐用法：每轮从干净快照开始。

@@ -34,6 +34,16 @@ absolutize() {
     fi
 }
 
+# 输出目录（测试包、测试结果）可能尚不存在，不能用存在性判断；
+# 相对值一律按仓库根锚定。
+absolutize_output() {
+    local v="$1"
+    case "$v" in
+        [A-Za-z]:[\\/]*|/*) printf '%s' "$v" ;;
+        *) cygpath -m "$repo_root/$v" 2>/dev/null || printf '%s' "$repo_root/$v" ;;
+    esac
+}
+
 # BINDGEN_EXTRA_CLANG_ARGS 按空白切分，把每个 -I 的目标路径做同样的锚定
 #（该变量不允许含空格路径，见 .env 说明，因此按空白切分是安全的）。
 absolutize_bindgen_args() {
@@ -49,6 +59,21 @@ absolutize_bindgen_args() {
         out="$out$tok "
     done
     printf '%s' "${out% }"
+}
+
+# 按变量类型做路径锚定；其余变量原样返回。
+resolve_value() {
+    local name="$1" value="$2"
+    case "$name" in
+        LIBCLANG_PATH|WDKContentRoot|DEVCON_PATH|WDK_BIN_PATH|VMRUN_PATH)
+            printf '%s' "$(absolutize "$value")" ;;
+        VM_TEST_PACKAGE_DIR|VM_TEST_RESULTS_DIR)
+            printf '%s' "$(absolutize_output "$value")" ;;
+        BINDGEN_EXTRA_CLANG_ARGS)
+            printf '%s' "$(absolutize_bindgen_args "$value")" ;;
+        *)
+            printf '%s' "$value" ;;
+    esac
 }
 
 # $1 = 文件名；$2 = 'force' 时覆盖已存在的同名环境变量。
@@ -91,16 +116,12 @@ load_file() {
         fi
 
         if [ "$print_mode" = "1" ]; then
-            case "$name" in
-                LIBCLANG_PATH|WDKContentRoot) value="$(absolutize "$value")" ;;
-                BINDGEN_EXTRA_CLANG_ARGS)     value="$(absolutize_bindgen_args "$value")" ;;
-            esac
+            value="$(resolve_value "$name" "$value")"
+            # 口令等敏感值不回显。
+            if [ "$name" = "VMRUN_GUEST_PASSWORD" ]; then value="***"; fi
             printf '%s=%s\n' "$name" "$value"
         else
-            case "$name" in
-                LIBCLANG_PATH|WDKContentRoot) value="$(absolutize "$value")" ;;
-                BINDGEN_EXTRA_CLANG_ARGS)     value="$(absolutize_bindgen_args "$value")" ;;
-            esac
+            value="$(resolve_value "$name" "$value")"
             export "$name=$value"
         fi
     done < "$path"
@@ -115,4 +136,17 @@ else
     load_file ".env.local" force
     set +a
     echo "[load-env] 已从 .env / .env.local 加载环境变量。"
+
+    # signtool 必须压过 Git Bash / MSYS PATH 里的同名第三方程序（它会报
+    # "unrecognized option: sign"）。auto-detect 由 build-package.ps1 负责。
+    if [ -n "${WDK_BIN_PATH:-}" ]; then
+        if [ ! -f "$WDK_BIN_PATH/signtool.exe" ]; then
+            echo "[load-env] 警告：WDK_BIN_PATH 下没有 signtool.exe：$WDK_BIN_PATH" >&2
+        else
+            case ":$PATH:" in
+                *":$WDK_BIN_PATH:"*) ;;
+                *) export PATH="$WDK_BIN_PATH:$PATH" ;;
+            esac
+        fi
+    fi
 fi

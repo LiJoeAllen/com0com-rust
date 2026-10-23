@@ -11,8 +11,8 @@
 
 > ⚠️ **状态**：核心架构、两套驱动源码、共享协议、`setupc` 均已完成。
 > 两套内核驱动已在 **WDK 10.0.28000 + wdk-sys 0.5.1** 环境下编译通过；同一套源码
-> 已于 2026-10-21 在 **Windows 11 24H2 测试虚拟机**中完成加载与端到端验证（当时构建
-> 基于 wdk-sys 0.4.0）：
+> 已于 2026-10-23 在 **Windows 11 24H2 测试虚拟机**中完成加载与端到端验证（构建即
+> wdk-sys 0.5.1，运行中驱动哈希与构建产物一致）：
 > `setupc add/remove/list`、COM15/COM16 双向 4096 字节传输、自动命名，以及删除后
 > 端口/PHANTOM/`SERIALCOMM` 清理均通过。验证流程已固化在
 > [`tools/vm-test/`](tools/vm-test/README.md)。
@@ -56,7 +56,7 @@ com0com-rust/
 │       ├── com0comport.inx    # 端口 INF 模板
 │       └── Makefile.toml
 └── tools/
-    ├── check-deps.ps1         # 第三方依赖版本一致性检查
+    ├── check-deps.ps1         # 第三方依赖版本一致性检查 / -Fix 同步
     ├── setupc/                # 用户态配置工具（com0com-setupc）
     │   ├── Cargo.toml
     │   └── src/main.rs
@@ -75,7 +75,9 @@ com0com-rust/
 >
 > 第三方依赖版本只在根 `Cargo.toml` 的 `[workspace.dependencies]` 中维护。两个驱动根
 > 无法继承该表，只能重复声明；`tools/check-deps.ps1` 会在 pre-commit 与 CI 中强制三者
-> 完全一致，并禁止包内依赖直接写版本号。
+> 完全一致，并禁止包内依赖直接写版本号。`-Fix` 可一键把驱动清单的
+> `[workspace.package]` / `[workspace.dependencies]` 与 `Makefile.toml` 内嵌的
+> `wdk-build` 版本同步为根值（本地 `path` 依赖不会被改）。
 >
 > `windows-sys` 直接依赖 GitHub `microsoft/windows-rs` 的 tag `74`（版本 0.100.0）：
 > crates.io 上仍停留在 0.61.2。0.100 的模块路径与 feature 名已改为小写头文件名
@@ -86,18 +88,21 @@ com0com-rust/
 ## 环境清单（`.env`，新机器先看这里）
 
 仓库根的 `.env` 是团队共享模板，列出了构建与虚拟机测试所需的**全部**可配置项。
-clone 之后只需三步：
+clone 之后只需两步：
 
 ```powershell
 cp .env .env.local        # 1. 复制一份本机配置
 # 2. 编辑 .env.local：填自己的 WDK 路径、虚拟机 .vmx、客户机账号口令等
-. tools/load-env.ps1      # 3. 加载（必须 dot-source）
 ```
 
+`tools/vm-test/` 下的脚本会**自动加载** `.env` / `.env.local`，填完即可直接运行；
+直接执行 `cargo` 命令时再手动加载：
+
+```powershell
+. tools/load-env.ps1      # PowerShell 必须 dot-source
+```
 ```bash
-# Git Bash 等价写法
-cp .env .env.local
-source tools/load-env.sh  # 必须 source
+source tools/load-env.sh  # Git Bash 必须 source
 ```
 
 | 变量 | 用途 |
@@ -106,14 +111,23 @@ source tools/load-env.sh  # 必须 source
 | `CARGO_BUILD_JOBS` | cargo 并行度，默认 2——内核 crate 首次 bindgen 极吃 CPU，别调太高 |
 | `LIBCLANG_PATH` | **必须是 libclang 18（18.1.1 已验证）**。22.1.x 有 bindgen 回归，会让 `wdk-sys` 编译爆成片 `E0080` |
 | `BINDGEN_EXTRA_CLANG_ARGS` | 给 bindgen 补 SDK 的 `shared/ucrt/um` 头文件路径（WDK 自带 Include 里没有）；路径不能含空格 |
-| `VMRUN_VMX_PATH` / `VMRUN_GUEST_USER` / `VMRUN_GUEST_PASSWORD` | 虚拟机端到端测试目标 |
-| `VMRUN_PATH` / `VMRUN_SNAPSHOT_NAME` / `VM_TEST_CONFIGURATION` / `VM_TEST_JOBS` | 同上，可选 |
+| `WDK_BIN_PATH` | 含 `signtool.exe` 的 SDK 版本化 bin 目录；会前置到 `PATH`，避免 MSYS 同名工具抢先命中 |
+| `DEVCON_PATH` | `devcon.exe` 完整路径；留空时在 `Windows Kits\10\Tools\**\x64` 自动查找 |
+| `COM0COM_TRACE` | `setupc` 诊断开关：非空即开启，日志写 stderr |
+| `VMRUN_VMX_PATH` / `VMRUN_GUEST_USER` / `VMRUN_GUEST_PASSWORD` | 虚拟机端到端测试目标（凭据只写 `.env.local`） |
+| `VMRUN_PATH` / `VMRUN_SNAPSHOT_NAME` | `vmrun.exe` 路径（留空自动查找）/ 要回滚的关机快照 |
+| `VM_TEST_CONFIGURATION` / `VM_TEST_JOBS` | 构建配置（debug/release）与并行度 |
+| `VM_TEST_PACKAGE_DIR` / `VM_TEST_RESULTS_DIR` | 测试包与日志输出目录；留空用 `target/` 下的默认位置 |
+| `VM_TEST_GUEST_DIR` / `VM_TEST_BOOT_TIMEOUT_SEC` | 客户机工作目录 / 等待客户机就绪的超时秒数 |
 
 规则：
 - **`.env` 入库，只放占位值**，禁止写真实口令；本机私密值一律写 **`.env.local`**（已 gitignore）
 - 优先级：命令行显式传参 → `.env.local` → 已有环境变量 → `.env` → 脚本默认值
   （`.env.local` 刻意能压过机器上遗留的环境变量——例如系统装的 libclang 22）
 - 核对实际生效值：`bash tools/load-env.sh --print` 或 `pwsh -File tools/load-env.ps1 -Print`
+  （口令自动打码）
+- 输入路径（`LIBCLANG_PATH`、`WDKContentRoot`、`DEVCON_PATH` 等）的相对值会锚定到仓库根；
+  `VM_TEST_*_DIR` 这类输出目录即使尚不存在也按仓库根解析；`VM_TEST_GUEST_DIR` 是客户机路径，原样传递
 
 > **为什么是三个 workspace**：`com0combus`（KMDF）与 `com0comport`（WDM）驱动模型不同，
 > 而 `wdk-build` 要求单张依赖图只有一种配置，同处一个 workspace 会让**任何**构建中止。
@@ -134,7 +148,8 @@ source tools/load-env.sh  # 必须 source
      `clang_getTypeDeclaration` 回归——对 `typedef struct X X; struct X {...};` 返回前向声明
      而非定义，导致 `wdk-sys` 生成的结构体退化为 `_address: u8`，编译时报几十条
      `E0080 size_of 溢出`（很容易误判成“没装 WDK”）。用 `LIBCLANG_PATH` 指向 LLVM 18 的
-     `bin` 目录即可；也可 `py -m pip install libclang==18.1.1` 后指向 wheel 内的 `clang/native`。
+     `bin` 目录即可；也可 `py -m pip install "libclang==18.1.1" --target target/libclang18`
+     后指向 wheel 内的 `clang/native`（`.env` 的默认值就是它）。
    - **WDK 10.0.28000 的 include 目录不含 SDK 头文件**：`Include/10.0.28000.0` 下只有
      `km`/`shared` 等 WDK 负载，`shared`/`ucrt`/`um` 需由另一版本的 Windows SDK
      （如 10.0.26100.0）提供。bindgen 报 `specstrings.h` 之类缺失时，用
@@ -197,15 +212,24 @@ cargo build --manifest-path crates/com0comport/Cargo.toml --release
 
 ## 安装与在测试 VM 中运行
 
-推荐使用已固化的自动化流程（构建 → 快照回滚 → 安装 → 双向传输验证 → 收集日志）：
+推荐使用已固化的自动化流程（构建 → 快照回滚 → 安装 → 双向传输验证 → 收集日志）。
+`.env.local` 填好 `VMRUN_*` 后，一条命令即可：
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File tools\vm-test\build-package.ps1
+powershell -ExecutionPolicy Bypass -File tools\vm-test\run-vm-test.ps1
+```
+
+连接参数仍可用命令行覆盖（优先级高于 `.env.local`）：
+
+```powershell
 powershell -ExecutionPolicy Bypass -File tools\vm-test\run-vm-test.ps1 `
   -VmxPath 'F:\VMs\com0com-test\com0com-test.vmx' `
   -GuestUser '<客户机用户名>' -GuestPassword '<客户机密码>' `
   -SnapshotName clean
 ```
+
+只重建测试包而不跑 VM：`tools\vm-test\build-package.ps1`；复用已有测试包：
+`run-vm-test.ps1 -SkipBuild`。
 
 前置条件、参数与排查见 [`tools/vm-test/README.md`](tools/vm-test/README.md)。
 手工安装步骤如下。

@@ -12,4 +12,5 @@
 2. 对每个 crate 生成 CycloneDX JSON。
 3. 与签名产物一并归档发布。
 
-> 本机无法构建，SBOM 生成须在 eWDK/CI 环境完成。
+> 生成 SBOM 需在装有 WDK 的构建机 / CI 环境完成；WDK、Windows SDK、libclang
+> 版本已记录在仓库根 `.env`，可直接作为系统构建依赖的输入。

@@ -16,7 +16,8 @@
 - 架构：bus(FDO) 枚举 port(PDO)；`PairContext` 非分页池共享，自旋锁保护环缓冲。
 - 关键决策：混合模型（KMDF 易枚举、WDM 控端口）；METHOD_BUFFERED；引用计数 PORT_LINK/UNLINK。
 - 安全立场：common 零 unsafe；setupc 业务零 unsafe + 输入零拷贝；内核 unsafe 收敛 helper。
-- 已知风险：P2 仿真参数为 stub；`wdk-sys` 符号需上机核对；本机无法构建内核。
+- 已知风险：P2 仿真参数仍为 stub；驱动已在 WDK 10.0.28000 + wdk-sys 0.5.1 下构建签名，
+  并于 2026-10-23 在 Windows 11 24H2 测试 VM 通过 31 项端到端断言。
 - 详见：`openspec/`、`security/`、`brain/`。
 
 ## 4. 复用条件（Conditions for Reuse）
