@@ -46,8 +46,9 @@ jobs:
         shell: pwsh
         run: ./tools/check-deps.ps1
 
-      # 只覆盖可在宿主机构建的 crate（com0com-common + tools/setupc）。
-      # 内核 crate（com0combus/com0comport）依赖 WDK，无法在普通 runner 上检查。
+      # 只覆盖可在宿主机构建的 crate（common/core/backend/sdk/ipc/daemon/capi
+      # 与 tools/*）。内核 crate（com0combus/com0comport）依赖 WDK，无法在普通
+      # runner 上检查。
       - name: clippy (deny warnings)
         run: >-
           cargo clippy --workspace
@@ -58,6 +59,129 @@ jobs:
         run: >-
           cargo test --workspace
           --exclude com0combus --exclude com0comport
+
+      # 0 C/C++ 约束：仓库不收纳手写 C/C++ 源文件；*.h 只允许由
+      # tools/header-gen 生成的 C ABI 快照。
+      - name: pure Rust source check
+        shell: bash
+        run: |
+          set -euo pipefail
+          bad=$(git ls-files '*.c' '*.cc' '*.cpp' '*.hpp')
+          if [ -n "$bad" ]; then
+            echo "unexpected handwritten C/C++ sources:"
+            echo "$bad"
+            exit 1
+          fi
+          unexpected_headers=$(git ls-files '*.h' | grep -v '^crates/com0com-capi/include/com0com_capi\.h$' || true)
+          if [ -n "$unexpected_headers" ]; then
+            echo "unexpected C headers (only the generated com0com_capi.h is allowed):"
+            echo "$unexpected_headers"
+            exit 1
+          fi
+          echo "pure Rust source check: OK"
+
+      # 头文件必须与 Rust 定义同步：重新生成后与仓库快照逐字节比较。
+      - name: C ABI header snapshot check
+        shell: bash
+        run: >-
+          cargo run -q -p com0com-header-gen --
+          --check crates/com0com-capi/include/com0com_capi.h
+
+  portability:
+    name: check + test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: false
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Cache cargo
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+      # setupc 已是平台中立的 SDK 前端，Phase 7 起纳入非 Windows 构建；
+      # 内核 crate 依赖 WDK，仍然排除。
+      - name: fmt check
+        run: cargo fmt --all -- --check
+      - name: check
+        run: >-
+          cargo check --workspace
+          --exclude com0combus --exclude com0comport
+      - name: test
+        run: >-
+          cargo test --workspace
+          --exclude com0combus --exclude com0comport
+
+  # Unix PTY 端到端验收：建对、链接、双向传输、仿真、Monitor/事件、
+  # daemon 重启恢复。默认不跑（耗时且依赖平台 PTY），仅在手动触发且
+  # 仓库变量 RUN_UNIX_E2E=true 时运行。
+  unix-e2e:
+    name: PTY E2E (${{ matrix.os }})
+    if: github.event_name == 'workflow_dispatch' && vars.RUN_UNIX_E2E == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: false
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-e2e-${{ hashFiles('**/Cargo.lock') }}
+      - name: Build tools
+        run: >-
+          cargo build
+          -p com0com-setupc -p com0com-daemon -p com0com-sdk-smoke
+      - name: Run PTY E2E
+        shell: bash
+        run: |
+          set -euo pipefail
+          stamp=$(date -u +%Y%m%d-%H%M%S)
+          out="target/vm-test-results/unix-${stamp}-${RUNNER_OS}"
+          mkdir -p "$out"
+          tools/vm-test/guest/check-pairs-unix.sh \
+            --base-dir target/debug \
+            --log "$out/check-pairs-unix.log"
+      # root 段验证 /dev（macOS 为 /dev/cu.com0com-*）默认链接与双向传输；
+      # 脚本仅在 euid=0 时执行该段，普通用户运行保持原有用例。
+      - name: Run PTY E2E (root default /dev links)
+        shell: bash
+        run: |
+          set -euo pipefail
+          stamp=$(date -u +%Y%m%d-%H%M%S)
+          out="target/vm-test-results/unix-${stamp}-${RUNNER_OS}-root"
+          mkdir -p "$out"
+          sudo "$PWD/tools/vm-test/guest/check-pairs-unix.sh" \
+            --base-dir "$PWD/target/debug" \
+            --log "$out/check-pairs-unix-root.log"
+      - name: Upload E2E log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unix-e2e-${{ matrix.os }}
+          path: target/vm-test-results
+          if-no-files-found: warn
+
 
   audit:
     name: cargo audit (RUSTSEC 依赖漏洞)

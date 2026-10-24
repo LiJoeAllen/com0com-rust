@@ -1,0 +1,32 @@
+[package]
+name = "com0com-sdk"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Stable Rust SDK facade for com0com pair management, monitoring and state persistence"
+
+[dependencies]
+com0com-core = { workspace = true }
+com0com-ipc = { workspace = true }
+serde_json = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+com0com-backend-win = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+com0com-backend-pty = { workspace = true }
+
+[target.'cfg(not(any(windows, unix)))'.dependencies]
+com0com-backend-stub = { workspace = true }
+
+[features]
+default = []
+# Exposes the in-memory backend and lets the smoke tests run without a driver.
+fake = ["com0com-core/fake"]
+
+# State tests need the in-memory backend even when the `fake` feature is off.
+[dev-dependencies]
+com0com-core = { workspace = true, features = ["fake"] }
+
+[lints]
+workspace = true

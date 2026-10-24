@@ -1,0 +1,16 @@
+[package]
+name = "com0com-capi-smoke"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "C ABI smoke test and layout self-check"
+
+[dependencies]
+com0com-capi = { workspace = true, features = ["fake"] }
+
+[[bin]]
+name = "capi-smoke"
+path = "src/main.rs"
+
+[lints]
+workspace = true

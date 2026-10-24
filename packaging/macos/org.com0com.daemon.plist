@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  com0comd 的 launchd 守护进程示例（macOS）。
+
+  以 root 运行，链接写入 /dev（/dev/cu.com0com-* 与 /dev/tty.com0com-*）。
+  状态默认放在 /Library/Application Support/com0com/state.json，
+  socket 默认 /var/run/com0com/control.sock。
+
+  安装（需要先创建目录并放入二进制）：
+    sudo mkdir -p "/Library/Application Support/com0com" /Library/Logs/com0com
+    sudo install -m 0755 target/release/com0comd /usr/local/bin/com0comd
+    sudo install -m 0644 packaging/macos/org.com0com.daemon.plist /Library/LaunchDaemons/
+    sudo launchctl load -w /Library/LaunchDaemons/org.com0com.daemon.plist
+
+  需要允许普通用户连接时，在 ProgramArguments 中追加
+  `--allow-uid <uid>`；socket 会切换为 0660 并按 peer uid 校验。
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>org.com0com.daemon</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/bin/com0comd</string>
+        <string>run</string>
+        <string>--restore</string>
+        <string>--autosave</string>
+        <string>--log</string>
+        <string>/Library/Logs/com0com/com0comd.log</string>
+    </array>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>COM0COM_STATE</key>
+        <string>/Library/Application Support/com0com/state.json</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- 只在异常退出时重启；`com0comd stop` 属于正常退出。 -->
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/Library/Logs/com0com/com0comd.stdout.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Library/Logs/com0com/com0comd.stderr.log</string>
+</dict>
+</plist>

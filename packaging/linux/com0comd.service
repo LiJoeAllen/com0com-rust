@@ -1,0 +1,35 @@
+# com0comd 的 systemd 单元示例（Linux）。
+#
+# 以 root 运行才能把稳定链接写进 /dev/com0com；状态文件放在 /var/lib，
+# 日志放在 /var/log。默认 socket 为 /run/com0com/control.sock，仅 root 可连。
+#
+# 安装：
+#   install -m 0755 target/release/com0comd /usr/local/bin/com0comd
+#   install -m 0644 packaging/linux/com0comd.service /etc/systemd/system/
+#   systemctl daemon-reload && systemctl enable --now com0comd
+#
+# 若要让普通桌面用户使用，给 ExecStart 追加 `--allow-uid <uid>`（可重复），
+# socket 会切换为 0660 并逐个连接校验 peer uid。不要放宽为 0666。
+
+[Unit]
+Description=com0com PTY serial pair daemon
+After=local-fs.target
+Before=multi-user.target
+
+[Service]
+Type=simple
+Environment=COM0COM_STATE=/var/lib/com0com/state.json
+RuntimeDirectory=com0com
+RuntimeDirectoryMode=0700
+StateDirectory=com0com
+LogsDirectory=com0com
+ExecStart=/usr/local/bin/com0comd run --restore --autosave --log /var/log/com0com/com0comd.log
+Restart=on-failure
+RestartSec=2
+
+# daemon 不需要额外特权：root 身份足以写 /dev，关闭提权可缩小攻击面。
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

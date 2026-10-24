@@ -431,26 +431,14 @@ pub unsafe fn dispatch_serial(ext: *mut PortExtension, irp: PIRP) -> NTSTATUS {
         ioctls::IOCTL_SERIAL_WAIT_ON_MASK => {
             // Pend until an event in the mask occurs.
             //
-            // (a) Arm the cancel routine *before* the IRP can be seen by any
-            //     other thread (it is not in the slot yet), under the cancel
-            //     spinlock so an `IoCancelIrp` cannot slip past us.
-            //     Because it is unpublished here, no peer can have dequeued and
-            //     completed it, so reading `(*irp).Cancel` is race-free (no
-            //     UAF) and the cancelled branch needs no slot ownership check.
-            // Both cancel-spinlock functions are generated in wdk_sys::ntddk.
-            let mut cancel_irql: KIRQL = 0;
-            IoAcquireCancelSpinLock(&mut cancel_irql);
-            if (*irp).Cancel != 0 {
-                IoReleaseCancelSpinLock(cancel_irql);
-                return complete(irp, wdk_sys::STATUS_CANCELLED, 0);
-            }
-            set_cancel_routine(irp, Some(readwrite::cancel_pending_irp));
-            IoReleaseCancelSpinLock(cancel_irql);
-
-            // (b) Decide under the pair lock. Every branch that completes the
-            //     IRP synchronously must first win ownership back with
-            //     `readwrite::claim_irp`; the publishing branch marks it
-            //     pending before it becomes visible.
+            // Same protocol as `readwrite::handle_read`: the synchronous
+            // branches never install a cancel routine (an `IoCancelIrp` without
+            // one only sets `Cancel`, it never completes the IRP), and the
+            // pending branch publishes the IRP under both locks (pair ->
+            // cancel). Doing the slot store and the routine install under the
+            // cancel spinlock closes the window where a cancel could complete
+            // — and the I/O manager recycle — an IRP that was not published
+            // yet.
             let irql = lock(pc);
             let mask = (*pc).port[idx].wait_mask;
             let pending = (*pc).port[idx].pending_events;
@@ -458,30 +446,31 @@ pub unsafe fn dispatch_serial(ext: *mut PortExtension, irp: PIRP) -> NTSTATUS {
                 let out_mask = mask & pending;
                 (*pc).port[idx].pending_events = 0;
                 unlock(pc, irql);
-                if readwrite::claim_irp(irp) {
-                    let out = out_mask;
-                    let n = write_out(irp, &out);
-                    complete(irp, wdk_sys::STATUS_SUCCESS, n)
-                } else {
-                    // Cancellation won the race and is completing it.
-                    wdk_sys::STATUS_PENDING
-                }
-            } else if (*pc).port[idx].pending_event_irp != 0 {
-                unlock(pc, irql);
-                if readwrite::claim_irp(irp) {
-                    complete(irp, wdk_sys::STATUS_INVALID_PARAMETER, 0)
-                } else {
-                    wdk_sys::STATUS_PENDING
-                }
-            } else {
-                // Publish: mark pending first, then make it visible.
-                // The WDK inline marks the current stack location's Control field.
-                mark_irp_pending(irp);
-                (*pc).port[idx].pending_event_irp = irp as u64;
-                unlock(pc, irql);
-                // Owned by the slot from here on; do not touch it again.
-                wdk_sys::STATUS_PENDING
+                let out = out_mask;
+                let n = write_out(irp, &out);
+                return complete(irp, wdk_sys::STATUS_SUCCESS, n);
             }
+            if (*pc).port[idx].pending_event_irp != 0 {
+                unlock(pc, irql);
+                return complete(irp, wdk_sys::STATUS_INVALID_PARAMETER, 0);
+            }
+            // Both cancel-spinlock functions are generated in wdk_sys::ntddk.
+            let mut cancel_irql: KIRQL = 0;
+            IoAcquireCancelSpinLock(&mut cancel_irql);
+            if (*irp).Cancel != 0 {
+                IoReleaseCancelSpinLock(cancel_irql);
+                unlock(pc, irql);
+                return complete(irp, wdk_sys::STATUS_CANCELLED, 0);
+            }
+            set_cancel_routine(irp, Some(readwrite::cancel_pending_irp));
+            // Mark pending first, then make it visible to peer/wait wakeups.
+            // The WDK inline marks the current stack location's Control field.
+            mark_irp_pending(irp);
+            (*pc).port[idx].pending_event_irp = irp as u64;
+            IoReleaseCancelSpinLock(cancel_irql);
+            unlock(pc, irql);
+            // Owned by the slot from here on; do not touch it again.
+            wdk_sys::STATUS_PENDING
         }
         ioctls::IOCTL_SERIAL_GET_STATS => {
             let irql = lock(pc);

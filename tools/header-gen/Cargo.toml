@@ -1,0 +1,16 @@
+[package]
+name = "com0com-header-gen"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Generate the C ABI header snapshot from Rust definitions"
+
+[dependencies]
+com0com-capi = { workspace = true }
+
+[[bin]]
+name = "header-gen"
+path = "src/main.rs"
+
+[lints]
+workspace = true

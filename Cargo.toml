@@ -3,9 +3,24 @@ resolver = "2"
 members = [
     # Shared, host-buildable (no_std, no WDK) data/IOCTL definitions.
     "crates/com0com-common",
-    # User-mode configuration tool — a normal std Win32 binary, buildable with
+    # Platform-independent SDK contract and domain model.
+    "crates/com0com-core",
+    # Backends: Windows kernel driver, Unix user-mode PTY, and a stub.
+    "crates/com0com-backend-win",
+    "crates/com0com-backend-pty",
+    "crates/com0com-backend-stub",
+    # Public SDK facade, local JSON-RPC transport and daemon, C ABI.
+    "crates/com0com-sdk",
+    "crates/com0com-ipc",
+    "crates/com0com-daemon",
+    "crates/com0com-capi",
+    # User-mode configuration tool — a normal std binary, buildable with
     # a plain `cargo build -p com0com-setupc`.
     "tools/setupc",
+    # Smoke tests and the generated C header emitter.
+    "tools/sdk-smoke",
+    "tools/capi-smoke",
+    "tools/header-gen",
 ]
 
 # The two kernel drivers are deliberately NOT workspace members: each of them is
@@ -36,7 +51,18 @@ exclude = [
 # a machine that has no WDK installed.
 default-members = [
     "crates/com0com-common",
+    "crates/com0com-core",
+    "crates/com0com-backend-win",
+    "crates/com0com-backend-pty",
+    "crates/com0com-backend-stub",
+    "crates/com0com-sdk",
+    "crates/com0com-ipc",
+    "crates/com0com-daemon",
+    "crates/com0com-capi",
     "tools/setupc",
+    "tools/sdk-smoke",
+    "tools/capi-smoke",
+    "tools/header-gen",
 ]
 
 # Single source of truth for version/edition/license of the host-buildable
@@ -53,6 +79,18 @@ license = "MIT OR Apache-2.0"
 # tools/check-deps.ps1 在 pre-commit 与 CI 中强制它们与本表完全一致。
 [workspace.dependencies]
 com0com-common = { path = "crates/com0com-common" }
+com0com-core = { path = "crates/com0com-core" }
+com0com-backend-win = { path = "crates/com0com-backend-win" }
+com0com-backend-pty = { path = "crates/com0com-backend-pty" }
+com0com-backend-stub = { path = "crates/com0com-backend-stub" }
+com0com-sdk = { path = "crates/com0com-sdk" }
+com0com-ipc = { path = "crates/com0com-ipc" }
+com0com-capi = { path = "crates/com0com-capi" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+base64 = "0.22"
+libc = "0.2"
 # crates.io 的 windows-sys 仍停在 0.61.2；GitHub tag 74 对应 0.100.0。
 windows-sys = { git = "https://github.com/microsoft/windows-rs", tag = "74" }
 wdk = "0.4"

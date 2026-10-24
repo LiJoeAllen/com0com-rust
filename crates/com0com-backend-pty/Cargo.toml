@@ -1,0 +1,15 @@
+[package]
+name = "com0com-backend-pty"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Unix user-mode PTY backend for the com0com SDK (pure Rust, no kernel driver)"
+
+[dependencies]
+com0com-core = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
+
+[lints]
+workspace = true

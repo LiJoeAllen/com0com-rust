@@ -1,0 +1,32 @@
+[package]
+name = "com0com-backend-win"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Windows backend: SetupAPI + DeviceIoControl bridge to the com0combus/com0comport Rust drivers"
+
+[dependencies]
+com0com-core = { workspace = true }
+com0com-common = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+sha2 = { workspace = true }
+windows-sys = { workspace = true, features = [
+    "setupapi",
+    "fileapi",
+    "ioapiset",
+    "handleapi",
+    "errhandlingapi",
+    "minwinbase",
+    "synchapi",
+    "winbase",
+    "winreg",
+    "winnt",
+    "winerror",
+    "winevt",
+    "winsvc",
+    "winver",
+] }
+
+[lints]
+workspace = true

@@ -71,3 +71,53 @@ created: 2026-10-21
   版本重复由 `tools/check-deps.ps1`（`-Fix` 可同步，pre-commit + CI 兜底）强制与根一致；
   附带收益是各驱动 `[profile.*] panic = "abort"` 真正生效。
 - 关联：[[architecture]]、[[bus-driver]]、[[port-driver]]。
+
+---
+type: decision
+status: accepted
+created: 2026-10-24
+---
+
+# 决策：Unix 采用用户态 PTY，不做平台内核驱动
+
+- 上下文：要求跨平台且 **0 手写 C/C++**；Linux C TTY 模块和 macOS DriverKit dext 都
+  需要 C/C++ 或复杂签名/SIP 流程，并长期绑定内核 ABI。
+- 决策：Windows 保留现有 Rust 内核驱动；Linux/macOS 使用纯 Rust 用户态 PTY backend。
+- 理由：唯一能满足 0 C/C++ 与可维护性的路径；PTY 是 POSIX 标准接口，应用可直接打开。
+- 替代与为何否掉：Linux 内核模块（C，违反约束）、DriverKit（C++/签名复杂）、
+  用户态虚拟串口 `socat` 依赖（外部进程、不可控）。
+- 后果：缺少 exclusive/plugin/pin wiring/驱动诊断/驱动日志；能力位如实为 false；
+  PTY 生命周期随创建进程结束，因此提供长驻 `com0comd`。
+- 关联：[[architecture]]、[[sdk-and-backends]]。
+
+---
+type: decision
+status: accepted
+created: 2026-10-24
+---
+
+# 决策：三种 SDK 形态共用能力位与领域模型
+
+- 上下文：UI 技术栈未知，可能用 Rust、C/C++ 或脚本语言；不同平台能力不一致。
+- 决策：Rust facade、C ABI、本地 JSON-RPC daemon 三种入口共用 `com0com-core`
+  的领域类型与 `Capabilities`；UI 先查能力再展示功能。
+- 理由：单一语义源，避免三套 API 漂移；能力位让缺失功能可预期地降级。
+- 后果：新增能力必须先加核心位；C ABI 头文件由 Rust 生成并由 CI diff 校验。
+- 关联：[[sdk-and-backends]]。
+
+---
+type: decision
+status: accepted
+created: 2026-10-24
+---
+
+# 决策：setupc 改薄 + 守护进程可选
+
+- 上下文：setupc 原先把 FFI、业务和输出混在一个 bin，UI 无法复用；Unix PTY 需要
+  长生命周期宿主。
+- 决策：setupc 只保留参数解析/输出，全部经 SDK；daemon 作为可选的本地 JSON-RPC 宿主，
+  提供 restore/autosave、事件与 monitor。
+- 理由：保持 VM 31 项 CLI 兼容，同时给 UI 稳定的进程外接口；不强制所有用户跑守护进程。
+- 后果：Unix 默认自动发现 daemon，未发现则退化进程内 PTY；`COM0COM_BACKEND`/
+  `COM0COM_DAEMON` 可显式控制。
+- 关联：[[setupc]]、[[sdk-and-backends]]。

@@ -39,8 +39,8 @@ param(
 
     [switch]$SkipReboot,
 
-    # 冷启动 / 快照回滚后的首次启动可能超过 5 分钟，默认留足 10 分钟。
-    [int]$BootTimeoutSec = 600,
+    # 冷启动 / 快照回滚后的首次启动可能超过 5 分钟，实测繁忙主机可超过 10 分钟。
+    [int]$BootTimeoutSec = 1200,
 
     [int]$Jobs = 2
 )
@@ -134,6 +134,30 @@ function Find-Vmrun {
     throw '未找到 vmrun.exe，请通过 -VmrunPath 指定 VMware Workstation 安装目录下的 vmrun.exe。'
 }
 
+function Assert-SnapshotPoweredOff([string]$Name) {
+    # VMware 允许给运行中的 VM 建快照；这类快照带内存状态，回滚后客户机可能
+    # 停在锁屏且 VMware Tools 起不来（实测 type=2）。只接受关机快照（type=0）。
+    # 快照元数据写在同名的 .vmsd 里，不在 .vmx。
+    $vmsd = [System.IO.Path]::ChangeExtension($VmxPath, '.vmsd')
+    if (-not (Test-Path -LiteralPath $vmsd)) { return }
+    $names = @{}
+    $types = @{}
+    foreach ($line in Get-Content -LiteralPath $vmsd) {
+        if ($line -match '^snapshot(\d+)\.displayName = "(.*)"$') {
+            $names[$matches[2]] = $matches[1]
+        }
+        elseif ($line -match '^snapshot(\d+)\.type = "(.*)"$') {
+            $types[$matches[1]] = $matches[2]
+        }
+    }
+    # 快照不存在时交给 vmrun 报错，这里不预判。
+    if (-not $names.ContainsKey($Name)) { return }
+    $type = $types[$names[$Name]]
+    if ($type -and $type -ne '0') {
+        throw "快照 '$Name' 不是关机快照（type=$type）；请关机后重建快照，或改用关机快照。"
+    }
+}
+
 $vmrun = Find-Vmrun
 $auth = @('-gu', $GuestUser, '-gp', $GuestPassword)
 
@@ -220,6 +244,10 @@ function Get-PackageHash([string]$relative) {
 }
 
 $status = 'FAIL'
+# 只有真正在本次运行中执行过 check-pairs.ps1 才允许判定 PASS；否则客户机里
+# 上一次遗留的 check-pairs.log 会被当成本次结果（曾导致就绪超时仍报 PASS）。
+$checkRan = $false
+$checkCode = 1
 try {
     if (-not $SkipBuild) {
         Write-Host "==> 构建测试包（$Configuration）"
@@ -234,6 +262,7 @@ try {
     Write-Host "==> 期望哈希 bus=$expectedBusHash port=$expectedPortHash"
 
     if ($SnapshotName) {
+        Assert-SnapshotPoweredOff $SnapshotName
         if (Test-VmRunning) {
             Write-Host '==> 停止运行中的测试虚拟机（hard）'
             Invoke-Vmrun @('stop', $VmxPath, 'hard')
@@ -284,6 +313,7 @@ try {
         ExpectedBusHash  = $expectedBusHash
         ExpectedPortHash = $expectedPortHash
     }
+    $checkRan = $true
     $checkCode = Invoke-GuestScript 'check-pairs.ps1' $checkArgs
     if ($checkCode -ne 0) { Write-Host '串口对检查返回失败。' -ForegroundColor Red }
 }
@@ -292,17 +322,20 @@ catch {
 }
 finally {
     Write-Host '==> 收集客户机日志'
-    foreach ($name in 'install-bus.log', 'install-port.log', 'check-pairs.log') {
+    foreach ($name in 'install-bus.log', 'install-port.log', 'check-pairs.log', 'com0comd.log') {
         $null = Copy-FromGuest "$GuestDir\$name" (Join-Path $ResultsDir $name)
     }
 
     $checkLog = Join-Path $ResultsDir 'check-pairs.log'
     Write-Host ''
-    if (Test-Path $checkLog) {
+    if (-not $checkRan) {
+        Write-Host '未执行 check-pairs.ps1，结果为 FAIL（不解析客户机遗留日志）。'
+    }
+    elseif (Test-Path $checkLog) {
         $resultLine = Select-String -Path $checkLog -Pattern 'RESULT\|' | Select-Object -Last 1
         if ($resultLine) {
             Write-Host $resultLine.Line
-            if ($resultLine.Line -match 'RESULT\|\s*PASS') { $status = 'PASS' }
+            if ($checkCode -eq 0 -and $resultLine.Line -match 'RESULT\|\s*PASS') { $status = 'PASS' }
         }
         # 行首带时间戳，按子串匹配；排除结尾的 RESULT| FAIL 汇总行。
         $failures = @(Select-String -Path $checkLog -Pattern 'FAIL\|' |

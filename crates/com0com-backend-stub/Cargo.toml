@@ -1,0 +1,12 @@
+[package]
+name = "com0com-backend-stub"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Explicit Unsupported backend for unknown platforms and tests"
+
+[dependencies]
+com0com-core = { workspace = true }
+
+[lints]
+workspace = true

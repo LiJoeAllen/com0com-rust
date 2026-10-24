@@ -5,28 +5,13 @@ edition.workspace = true
 license.workspace = true
 description = "User-mode configuration tool for the Rust com0com virtual null-modem serial driver"
 
-# `setupc` is a plain user-mode (std) Win32 console app. Unlike the kernel
-# drivers it does NOT need the WDK toolchain — `cargo build` is enough. It
-# talks to the bus driver through the private IOCTL_COM0COM_* control codes
-# defined in `com0com-common`.
+# `setupc` is a thin, platform-neutral CLI over `com0com-sdk`: argument
+# parsing and output formatting live here, all device access is delegated to
+# the backend selected by the SDK. It does not need the WDK toolchain.
 
 [dependencies]
-com0com-common = { workspace = true }
-
-# Lightweight raw Win32 bindings (no build script, no MSVC dependency).
-# 版本号由根 workspace 统一管理，指向 GitHub 上的 windows-sys 0.100。
-# 0.100 起 feature 改为小写头文件名（不再是 Win32_* 形式），
-# 句柄类型为不透明指针（HANDLE/HWND = *mut c_void），用法见 src/main.rs。
-windows-sys = { workspace = true, features = [
-    "setupapi",        # SetupDi* 设备接口枚举
-    "fileapi",         # CreateFileW, OPEN_EXISTING
-    "ioapiset",        # DeviceIoControl
-    "handleapi",       # CloseHandle, INVALID_HANDLE_VALUE
-    "errhandlingapi",  # GetLastError
-    "minwinbase",      # OVERLAPPED
-    "winnt",           # HANDLE, GENERIC_READ/WRITE, FILE_ATTRIBUTE_NORMAL
-    "winerror",        # ERROR_INSUFFICIENT_BUFFER
-] }
+com0com-core = { workspace = true }
+com0com-sdk = { workspace = true }
 
 [[bin]]
 name = "setupc"

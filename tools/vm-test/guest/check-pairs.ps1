@@ -5,7 +5,8 @@
 .DESCRIPTION
     覆盖：清理旧 pair → 显式命名 pair 0（COM15/COM16）→ 设备状态 → 运行中
     驱动哈希 → 双向 4096 字节传输 → 删除后端口/PHANTOM/SERIALCOMM 清理 →
-    pair 5（COM20/COM21）双向 1024 字节 → 自动命名 pair 7 → 最终列表清空。
+    pair 5（COM20/COM21）双向 1024 字节 + 波特率仿真写路径 → 自动命名 pair 7 →
+    SDK/C ABI 冒烟 → daemon JSON-RPC → --autosave/--restore → 最终列表清空。
 
     每条断言写 `PASS|` / `FAIL|` 到 check-pairs.log，结尾写
     `RESULT| PASS|FAIL checks=N failures=M`，供宿主机解析。
@@ -53,9 +54,20 @@ function Brief([string]$text) {
 }
 
 function RunSetupc([string]$tag, [string[]]$arguments) {
+    $result = Run-Tool $tag $setupc $arguments 60000
+    $script:setupcExit = $result.ExitCode
+    return $result
+}
+
+function Run-Tool([string]$tag, [string]$exe, [string[]]$arguments, [int]$timeoutMs = 180000) {
+    if (-not (Test-Path $exe)) {
+        L "$tag| MISSING $exe"
+        return [pscustomobject]@{ ExitCode = -1; Text = '' }
+    }
+
     # Start-Process + 重定向时 ExitCode 可能为空，改用 .NET Process 异步读取输出。
     $psi = New-Object System.Diagnostics.ProcessStartInfo
-    $psi.FileName = $setupc
+    $psi.FileName = $exe
     $psi.Arguments = (($arguments | ForEach-Object {
         if ($_ -match '\s') { '"' + $_ + '"' } else { $_ }
     }) -join ' ')
@@ -68,26 +80,63 @@ function RunSetupc([string]$tag, [string[]]$arguments) {
     $process.StartInfo = $psi
     try { $null = $process.Start() } catch {
         L "$tag| START ERROR $($_.Exception.Message)"
-        $script:setupcExit = -1
         return [pscustomobject]@{ ExitCode = -1; Text = '' }
     }
 
     $outTask = $process.StandardOutput.ReadToEndAsync()
     $errTask = $process.StandardError.ReadToEndAsync()
-    $finished = $process.WaitForExit(60000)
+    $finished = $process.WaitForExit($timeoutMs)
     if (-not $finished) {
         try { $process.Kill() } catch {}
         L "$tag| TIMEOUT"
-        $script:setupcExit = -1
         return [pscustomobject]@{ ExitCode = -1; Text = '' }
     }
     $text = [string]$outTask.Result + [string]$errTask.Result
     $code = $process.ExitCode
     $process.Dispose()
-    $script:setupcExit = $code
     L "$tag| exit=$code"
     foreach ($line in ($text -split "`r?`n")) { if ($line.Trim()) { L "$tag> $line" } }
     return [pscustomobject]@{ ExitCode = $code; Text = $text }
+}
+
+function Start-Daemon([string]$exe, [string]$pipe, [string]$logPath, [string]$statePath, [bool]$restore) {
+    $arguments = @('run', '--pipe', $pipe, '--autosave', '--log', $logPath)
+    if ($restore) { $arguments += '--restore' }
+    $argList = (($arguments | ForEach-Object {
+        if ($_ -match '\s') { '"' + $_ + '"' } else { $_ }
+    }) -join ' ')
+
+    # daemon 通过 COM0COM_STATE 指向测试自己的状态文件，避免污染系统默认路径。
+    $previous = $env:COM0COM_STATE
+    $env:COM0COM_STATE = $statePath
+    try {
+        return Start-Process -FilePath $exe -ArgumentList $argList -PassThru -WindowStyle Hidden `
+            -RedirectStandardOutput "$logPath.stdout" -RedirectStandardError "$logPath.stderr"
+    }
+    finally {
+        $env:COM0COM_STATE = $previous
+    }
+}
+
+function Wait-DaemonStatus([string]$exe, [string]$pipe, [int]$timeoutSec) {
+    $deadline = (Get-Date).AddSeconds($timeoutSec)
+    $result = $null
+    do {
+        $result = Run-Tool 'daemon-status' $exe @('status', '--pipe', $pipe) 15000
+        if ($result.ExitCode -eq 0) { return $result }
+        Start-Sleep -Milliseconds 500
+    } while ((Get-Date) -lt $deadline)
+    return $result
+}
+
+function Stop-DaemonProcess($process) {
+    if ($process -and -not $process.HasExited) {
+        try {
+            $process.Kill()
+            $null = $process.WaitForExit(5000)
+        }
+        catch {}
+    }
 }
 
 function Get-PairIds {
@@ -306,6 +355,14 @@ try {
     Check 'pair5| transfer A->B 1024 bytes' (Test-Transfer $PairCPort $PairDPort 1024 'A->B')
     Check 'pair5| transfer B->A 1024 bytes' (Test-Transfer $PairDPort $PairCPort 1024 'B->A')
 
+    # 仿真写路径回归：v8 在 emu_br 打开时以 NULL 时间戳触发 0xA，必须实机覆盖。
+    $result = RunSetupc 'set-5-emu' @('set', '5', '--baud-emu', '--overrun')
+    Check 'pair5| enable baud emulation' ($result.ExitCode -eq 0 -and $result.Text -match 'Updated pair 5') (Brief $result.Text)
+    $result = RunSetupc 'params-5-emu' @('params', '5')
+    $flagsOk = $result.Text -match 'baud-emu, overrun'
+    Check 'pair5| params report baud-emu+overrun' $flagsOk (Brief $result.Text)
+    Check 'pair5| transfer with baud emulation' (Test-Transfer $PairCPort $PairDPort 256 'emu A->B')
+
     $result = RunSetupc 'remove-5' @('remove', '5')
     Check 'pair5| remove' ($result.ExitCode -eq 0) (Brief $result.Text)
     Check 'pair5| ports removed' (Wait-ForPorts @($PairCPort, $PairDPort) $false 30) "ports=$((Get-Ports) -join ',')"
@@ -335,6 +392,88 @@ try {
     $result = RunSetupc 'remove-7' @('remove', '7')
     Check 'auto| remove' ($result.ExitCode -eq 0) (Brief $result.Text)
     Check 'auto| ports removed' (Wait-ForPorts $autoNames $false 30) "ports=$((Get-Ports) -join ',')"
+
+    # ---- 阶段 5：SDK / C ABI / daemon 冒烟 ------------------------------
+    L '--- sdk / capi / daemon smoke ---'
+    $sdkSmoke = Join-Path $BaseDir 'sdk-smoke.exe'
+    $capiSmoke = Join-Path $BaseDir 'capi-smoke.exe'
+    $daemonExe = Join-Path $BaseDir 'com0comd.exe'
+    $capiDll = Join-Path $BaseDir 'com0com_capi.dll'
+    Check 'capi| com0com_capi.dll packaged' (Test-Path $capiDll)
+
+    $result = Run-Tool 'capi-self-test' $capiSmoke @('--self-test')
+    Check 'capi| self-test' ($result.ExitCode -eq 0) (Brief $result.Text)
+
+    $result = Run-Tool 'capi-native' $capiSmoke @('--native')
+    Check 'capi| native smoke' ($result.ExitCode -eq 0) (Brief $result.Text)
+
+    $result = Run-Tool 'sdk-fake' $sdkSmoke @('--fake')
+    Check 'sdk| fake smoke' ($result.ExitCode -eq 0) (Brief $result.Text)
+
+    $result = Run-Tool 'sdk-native' $sdkSmoke @('--native')
+    Check 'sdk| native smoke' ($result.ExitCode -eq 0) (Brief $result.Text)
+
+    $result = Run-Tool 'rpc-selftest' $daemonExe @('selftest')
+    Check 'rpc| daemon selftest' ($result.ExitCode -eq 0) (Brief $result.Text)
+
+    # ---- 阶段 6：daemon JSON-RPC + --autosave/--restore -----------------
+    L '--- daemon rpc: autosave / restore ---'
+    $pipe = 'com0com-vmtest'
+    $statePath = Join-Path $BaseDir 'state.json'
+    $daemonLog = Join-Path $BaseDir 'com0comd.log'
+    Remove-Item $statePath -Force -ErrorAction SilentlyContinue
+    Remove-Item $daemonLog -Force -ErrorAction SilentlyContinue
+    Remove-Item "$daemonLog.stdout" -Force -ErrorAction SilentlyContinue
+    Remove-Item "$daemonLog.stderr" -Force -ErrorAction SilentlyContinue
+    $null = Run-Tool 'rpc-preflight' $daemonExe @('stop', '--pipe', $pipe) 15000
+
+    $daemon = $null
+    try {
+        $daemon = Start-Daemon $daemonExe $pipe $daemonLog $statePath $false
+        $status = Wait-DaemonStatus $daemonExe $pipe 30
+        Check 'rpc| daemon started' ($status.ExitCode -eq 0) (Brief $status.Text)
+
+        $result = Run-Tool 'rpc-sdk' $sdkSmoke @('--daemon', $pipe)
+        Check 'rpc| sdk smoke over daemon' ($result.ExitCode -eq 0) (Brief $result.Text)
+
+        # 在 daemon 运行期间用 setupc 建 pair 9，退出时的最终 autosave 会把
+        # 驱动里的真实状态写进 state.json。
+        $result = RunSetupc 'restore-seed' @('add', '--id', '9', '--port-a', 'COM25', '--port-b', 'COM26')
+        if ($result.ExitCode -ne 0) { L "restore| seed failed: $(Brief $result.Text)" }
+        $null = Wait-ForPairReady 9 $PairTimeoutSec
+
+        $result = Run-Tool 'rpc-stop' $daemonExe @('stop', '--pipe', $pipe) 30000
+        $exited = $daemon.WaitForExit(15000)
+        Check 'rpc| daemon stop' ($result.ExitCode -eq 0 -and $exited) (Brief $result.Text)
+    }
+    finally {
+        Stop-DaemonProcess $daemon
+    }
+    Check 'rpc| autosave wrote state file' (Test-Path $statePath) "path=$statePath"
+
+    $null = RunSetupc 'restore-clear' @('remove', '9')
+    $null = Wait-ForPorts @('COM25', 'COM26') $false 30
+    Start-Sleep -Seconds 2
+
+    $daemon = $null
+    try {
+        $daemon = Start-Daemon $daemonExe $pipe $daemonLog $statePath $true
+        $status = Wait-DaemonStatus $daemonExe $pipe 30
+        Check 'rpc| daemon restarted with --restore' ($status.ExitCode -eq 0) (Brief $status.Text)
+
+        $list = RunSetupc 'restore-list' @('list')
+        Check 'restore| pair 9 recreated' ($list.Text -match '(?m)^\s*9\s+') (Brief $list.Text)
+        Check 'restore| ports restored' (Wait-ForPorts @('COM25', 'COM26') $true 30) "ports=$((Get-Ports) -join ',')"
+
+        $null = Run-Tool 'rpc-stop-restore' $daemonExe @('stop', '--pipe', $pipe) 30000
+        $null = $daemon.WaitForExit(15000)
+    }
+    finally {
+        Stop-DaemonProcess $daemon
+    }
+
+    $null = RunSetupc 'restore-cleanup' @('remove', '9')
+    Start-Sleep -Seconds 2
 
     $result = RunSetupc 'list-final' @('list')
     Check 'cleanup| final list empty' ($result.Text -match '\(no pairs\)') (Brief $result.Text)

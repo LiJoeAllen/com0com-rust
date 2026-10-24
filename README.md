@@ -1,34 +1,62 @@
 # com0com-rust
 
-用 Rust 对 **com0com**（Windows 虚拟 null-modem 串口驱动）进行的一次**全量重写**。
+用 Rust 重写的 **com0com** 虚拟 null-modem 串口对：Windows 保留 Rust 内核驱动，
+Linux/macOS 使用纯 Rust 用户态 PTY，两者共用同一套分层 SDK、C ABI 与本机 JSON-RPC
+守护进程。仓库**不包含任何手写 C/C++ 源文件**，也不提供具体 GUI——只提供让 UI
+像调用 SDK 一样使用的契约与实现。
 
-目标不是“能加载的雏形”，而是一个真正可用的虚拟串口对仿真器：
+- Windows：Rust 内核驱动（`com0combus` KMDF 总线 + `com0comport` WDM 端口），
+  `CreateFile("COMx")` 与整套 Win32 Comm API 透明可用；
+- Linux/macOS：无内核模块，PTY 对由 `com0comd` 持有，稳定链接暴露为普通设备路径；
+- 三种 SDK 形态：Rust 门面 `com0com-sdk`、C ABI `com0com_capi` + 生成头文件、
+  本机 JSON-RPC（`com0comd`，无网络监听）；
+- 能力位诚实反映实现差异：Unix 不具备的内核级能力一律为 `false`，不支持参数返回
+  `Unsupported`，不会静默伪造。
 
-- 不限数量的动态串口对（`setupc` 创建/删除）；
-- 完整的 `IOCTL_SERIAL_*` 表面，使 `CreateFile("COMx")` 与整套 Win32 Comm API 透明可用；
-- 两端口之间通过共享内存环缓冲做数据转发，并实现 modem 信号映射；
-- 用户态配置工具 `setupc`（对标原版 `setupc`/`setupg`）。
-
-> ⚠️ **状态**：核心架构、两套驱动源码、共享协议、`setupc` 均已完成。
-> 两套内核驱动已在 **WDK 10.0.28000 + wdk-sys 0.5.1** 环境下编译通过；同一套源码
-> 已于 2026-10-23 在 **Windows 11 24H2 测试虚拟机**中完成加载与端到端验证（构建即
-> wdk-sys 0.5.1，运行中驱动哈希与构建产物一致）：
-> `setupc add/remove/list`、COM15/COM16 双向 4096 字节传输、自动命名，以及删除后
-> 端口/PHANTOM/`SERIALCOMM` 清理均通过。验证流程已固化在
-> [`tools/vm-test/`](tools/vm-test/README.md)。
-> 没有 WDK 的机器仍只能构建 `com0com-common` 与 `setupc` 两个纯用户态/无 std 的包。
+> ⚠️ **状态**：Phase 0–7 的分层架构、Windows 内核驱动、Unix PTY 后端、SDK/IPC/
+> daemon/C ABI 均已实现。Windows 侧于 2026-10-24 在 **Windows 11 24H2 测试虚拟机**
+> 完成 47 项断言（`setupc` 31 项 + SDK/C ABI/RPC、波特率仿真写路径与
+> daemon `--restore`/`--autosave`），
+> 驱动 SHA-256 与构建产物一致；Unix PTY 已在 Linux（WSL2，51/51）实机通过，
+> macOS 仅完成交叉编译检查，端到端脚本为
+> [`tools/vm-test/guest/check-pairs-unix.sh`](tools/vm-test/guest/check-pairs-unix.sh)。
+> 平台差异、能力矩阵与部署步骤见 [`docs/platforms.md`](docs/platforms.md)。
 
 ---
 
-## 架构（混合驱动模型）
+## 分层架构
 
-采用**混合模型**：
+```
+UI / 业务代码
+   │  Rust facade            C ABI                    JSON-RPC
+   ▼                         ▼                        ▼
+com0com-sdk ─────────── com0com-capi ─────────── com0com-ipc ── com0com-daemon
+   │                         │                        (named pipe / Unix socket)
+   ▼                         ▼
+com0com-core（模型、能力位、错误、事件、Backend/Monitor trait、状态快照）
+   │
+   ├── com0com-backend-win   Windows：SetupAPI + DeviceIoControl
+   ├── com0com-backend-pty   Linux/macOS：纯 Rust PTY + 用户态仿真
+   └── com0com-backend-stub  其他平台：全部 Unsupported
+```
+
+**关键设计点**
+
+- 所有平台共享 `com0com-core` 的 `PairId`/`PairParams`/`PortInfo`/`Event`/`SdkError`
+  与状态 schema，UI 不需要按平台写业务分支，只查能力位。
+- `com0com-sdk` 在 Unix 上自动探测本机 daemon，失败才退回进程内 PTY；
+  Windows 默认同进程 IOCTL，设置 `COM0COM_DAEMON=1` 时改走 named pipe。
+- `com0comd` 只监听本机 IPC（无 TCP/UDP），Unix socket 默认 `0600`，可用
+  `--allow-uid` 切换为 `0660` 并逐连接校验 peer uid；`serial.open` 只接受后端管理的端口。
+- 状态文件采用临时文件 + `sync_all` + rename 原子写入；`--restore` 在启动时恢复，
+  `--autosave` 在变更后防抖保存并在退出时最终保存。
+
+## 驱动模型（Windows，保持不变）
 
 | 组件 | 模型 | 产物 | 说明 |
 |------|------|------|------|
 | `com0combus`  | **KMDF** 总线驱动 | `com0combus.sys` | 创建根 FDO，枚举每对串口的 2 个 PDO；持有每对共享的 `PairContext`（非分页池），通过私有 IOCTL 暴露给端口驱动与 `setupc`。 |
 | `com0comport` | **WDM** 端口功能驱动 | `com0comport.sys` | 运行在总线枚举出的 PDO 上；实现 `IOCTL_SERIAL_*`，把数据在成对端口间转发；通过 `IOCTL_COM0COM_PORT_LINK` 拿到 `PairContext` 的内核虚地址（同地址空间，裸指针共享合法）。 |
-| `setupc`      | 用户态 Win32 控制台 | `setupc.exe`      | 通过 `GUID_COM0COM_BUS` 设备接口打开总线，发出私有 `IOCTL_COM0COM_*` 来增删查串口对与参数。 |
 | `com0com-common` | 无 std 共享库 | — | `IOCTL_*` 控制码、`SERIAL_*` 结构体、`PairContext`/环缓冲、私有协议结构。内核态与用户态共同依赖，保证线格式一致。 |
 
 **关键设计点**
@@ -44,44 +72,39 @@
 
 ```
 com0com-rust/
-├── Cargo.toml                 # 工作区；default-members 仅含可在本机构建的包
+├── Cargo.toml                 # 根 workspace；三个 workspace 根见下文
 ├── crates/
 │   ├── com0com-common/        # 共享（no_std）数据结构/IOCTL/协议
-│   ├── com0combus/            # KMDF 总线驱动（com0combus.sys）
-│   │   ├── src/{bus,driver,pdo,ioctl}.rs
-│   │   ├── com0combus.inx     # 总线 INF 模板
-│   │   └── Makefile.toml      # cargo-wdk 构建脚本
-│   └── com0comport/           # WDM 端口驱动（com0comport.sys）
-│       ├── src/{driver,dispatch,readwrite,serial,comname}.rs
-│       ├── com0comport.inx    # 端口 INF 模板
-│       └── Makefile.toml
+│   ├── com0com-core/          # 领域模型、能力位、Backend/Monitor trait、状态
+│   ├── com0com-backend-win/   # Windows SetupAPI + IOCTL 后端
+│   ├── com0com-backend-pty/   # Linux/macOS 纯 Rust PTY 后端
+│   ├── com0com-backend-stub/  # 未知平台 Unsupported 后端
+│   ├── com0com-sdk/           # Rust 门面（事件、Monitor、状态、daemon 选择）
+│   ├── com0com-ipc/           # JSON-RPC DTO/分帧/传输/RemoteBackend
+│   ├── com0com-daemon/        # com0comd 二进制与 serve 核心
+│   ├── com0com-capi/          # C ABI 动态库 + 生成头文件
+│   ├── com0combus/            # KMDF 总线驱动（独立 workspace 根）
+│   └── com0comport/           # WDM 端口驱动（独立 workspace 根）
+├── docs/                      # sdk / jsonrpc / c-abi / platforms
+├── packaging/                 # systemd 与 launchd 示例
 └── tools/
     ├── check-deps.ps1         # 第三方依赖版本一致性检查 / -Fix 同步
-    ├── setupc/                # 用户态配置工具（com0com-setupc）
-    │   ├── Cargo.toml
-    │   └── src/main.rs
-    └── vm-test/               # 隔离 VM 的构建/安装/端到端验证脚本
-        ├── README.md
-        ├── build-package.ps1
-        ├── run-vm-test.ps1
-        └── guest/             # 在客户机内执行的安装与检查脚本
+    ├── setupc/                # 跨平台 CLI（com0com-setupc）
+    ├── sdk-smoke/             # SDK 冒烟（fake/native/daemon）
+    ├── capi-smoke/            # C ABI 冒烟与布局自检
+    ├── header-gen/            # 从 Rust 定义生成 C 头文件快照
+    └── vm-test/               # 隔离 VM 与 Unix PTY 端到端脚本
 ```
 
-> 工作区 `default-members` 被设为 `com0com-common` 与 `tools/setupc`，因此一条裸 `cargo build`
-> 只构建这两个可在无 WDK 机器上编译的包，避免去触碰需要 WDK 的内核 crate。
->
-> 两个内核驱动**不是**本工作区的成员，各自是独立的工作区根（见下文“构建”），
-> 因为它们声明的驱动模型不同（KMDF vs WDM），而 `wdk-build` 要求整张依赖图只有一种配置。
+> 根 workspace 的 `default-members` 只含宿主可构建的包；两个内核驱动各自是独立
+> workspace 根，因为 KMDF 与 WDM 驱动模型不能共存于同一张依赖图（`wdk-build` 会拒绝）。
 >
 > 第三方依赖版本只在根 `Cargo.toml` 的 `[workspace.dependencies]` 中维护。两个驱动根
 > 无法继承该表，只能重复声明；`tools/check-deps.ps1` 会在 pre-commit 与 CI 中强制三者
-> 完全一致，并禁止包内依赖直接写版本号。`-Fix` 可一键把驱动清单的
-> `[workspace.package]` / `[workspace.dependencies]` 与 `Makefile.toml` 内嵌的
-> `wdk-build` 版本同步为根值（本地 `path` 依赖不会被改）。
+> 完全一致，并禁止包内依赖直接写版本号。`-Fix` 可一键同步。
 >
-> `windows-sys` 直接依赖 GitHub `microsoft/windows-rs` 的 tag `74`（版本 0.100.0）：
-> crates.io 上仍停留在 0.61.2。0.100 的模块路径与 feature 名已改为小写头文件名
-> （`Win32::setupapi`、feature `setupapi` 等），`tools/setupc` 已按新布局迁移。
+> `.cargo/config.toml` 的 `crt-static` 只作用于 Windows 目标，Linux/macOS 构建
+> （尤其是 C ABI 动态库）不受影响。
 
 ---
 
@@ -180,13 +203,23 @@ source tools/load-env.sh  # Git Bash 必须 source
 ## 构建
 
 ```powershell
-# 用户态工具（无需 WDK，普通 cargo 即可；目标 x86_64-pc-windows-msvc）
-cargo build -p com0com-setupc --release
+# 用户态工具与 SDK（无需 WDK）
+cargo build -p com0com-setupc -p com0com-daemon -p com0com-sdk -p com0com-capi --release
+cargo build -p com0com-sdk-smoke -p com0com-capi-smoke -p com0com-header-gen
 
 # 内核驱动（需要 WDK/eWDK；各自是独立工作区根，必须用 --manifest-path 指定）
 cargo build --manifest-path crates/com0combus/Cargo.toml --release
 cargo build --manifest-path crates/com0comport/Cargo.toml --release
 ```
+
+Linux/macOS 上同一条命令即可构建 CLI、daemon 与 SDK（PTY 后端不需要内核头文件）：
+
+```bash
+cargo build -p com0com-setupc -p com0com-daemon -p com0com-sdk-smoke
+```
+
+> `com0comd`、`setupc`、`sdk-smoke` 与 C ABI 动态库的产物名分别为 `com0comd`、
+> `setupc`、`sdk-smoke`、`com0com_capi`。
 
 > 本机实测通过的构建环境（WDK 10.0.28000 + Windows SDK 10.0.26100 + libclang 18.1），
 > 需要显式指定 libclang 与 SDK 头文件路径（原因见上文“环境”）：
@@ -257,6 +290,11 @@ powershell -ExecutionPolicy Bypass -File tools\vm-test\run-vm-test.ps1 `
 
 4. 删除：`setupc remove 0`。
 
+Linux / macOS 不需要安装驱动：构建后由 `com0comd`（或进程内 PTY 后端）创建
+`/dev/com0com/<label>` 或 `/dev/cu.com0com-<label>` 链路，非 root 用户自动退化为
+用户目录下的端口路径。systemd / launchd 单元与完整说明见
+[`docs/platforms.md`](docs/platforms.md)。
+
 ---
 
 ## `setupc` 用法
@@ -270,27 +308,79 @@ setupc params <id>
 setupc set   <id> [same flags as add, minus --id/--port-*]
 ```
 
-- 省略 `--port-a/--port-b` 时由系统 COM 名称仲裁分配 `COMx`。
+- 省略 `--port-a/--port-b` 时：Windows 由系统 COM 名称仲裁分配 `COMx`；
+  Unix 默认使用 `A{id}` / `B{id}` 作为链路标签。
 - `--noise=PROB` 中的 `PROB` 为 0..10000（单位 0.01%，即 `PROB/100` 为百分比）。
 - 省略 `--id` 时自动选择最小可用 id（上限 64 对）。
-- 需要**管理员权限**运行（打开总线设备接口需要写访问）。
+- Windows 需要**管理员权限**运行（打开总线设备接口需要写访问）。
 - 排查问题时设置环境变量 `COM0COM_TRACE=1`，`setupc` 会把设备路径与每次 IOCTL 调用
   以 `[setupc]` 前缀写到 stderr，不影响正常输出。
 
-`setupc` 的实现位置：`tools/setupc/src/main.rs`。它通过
-`GUID_COM0COM_BUS`（`com0com-common` 中的 `GUID_COM0COM_BUS_BYTES`）枚举总线设备接口，
-再用 `CreateFileW` 打开并发出 `IOCTL_COM0COM_CREATE_PAIR` / `DELETE_PAIR` / `ENUM_PAIRS` /
-`GET_PARAMS` / `SET_PARAMS`。
+`setupc` 是 SDK 之上的薄封装，命令解析与输出格式保持不变，后端由平台自动选择：
+
+- **Windows**：经 `com0com-backend-win` 枚举 `GUID_COM0COM_BUS` 并发出
+  `IOCTL_COM0COM_CREATE_PAIR` / `DELETE_PAIR` / `ENUM_PAIRS` / `GET_PARAMS` / `SET_PARAMS`。
+- **Unix**：默认连接已运行的 `com0comd`；未检测到守护进程时退化为进程内 PTY 后端
+  （生命周期随 `setupc` 结束）。可用 `COM0COM_BACKEND=native|daemon` 强制指定，
+  或用 `COM0COM_DAEMON=1` 要求必须连接守护进程。
+- PTY 后端不具备的能力（`exclusive`、`plugin`、非 NULL 引脚接线）返回 `Unsupported`，
+  而不是静默忽略；完整能力矩阵见 [`docs/platforms.md`](docs/platforms.md)。
+
+---
+
+## SDK 快速上手
+
+面向 UI / 集成方的三种用法，共用同一套领域模型与能力位；细节见
+[`docs/sdk.md`](docs/sdk.md)、[`docs/jsonrpc.md`](docs/jsonrpc.md)、[`docs/c-abi.md`](docs/c-abi.md)。
+
+**Rust facade**
+
+```rust
+use com0com_sdk::Sdk;
+
+let sdk = Sdk::open()?;              // Windows: Win32 后端；Unix: 守护进程或进程内 PTY
+println!("{:?}", sdk.capabilities());
+let id = sdk.create_pair(None, &Default::default())?;
+let info = sdk.list_pairs()?;
+sdk.delete_pair(id)?;
+```
+
+**本地 JSON-RPC 守护进程**（Unix 长生命周期场景）
+
+```sh
+com0comd run --restore --autosave --log /var/log/com0com/com0comd.log
+sdk-smoke --daemon /run/com0com/com0comd.sock
+```
+
+守护进程只监听本机 Unix socket（不监听网络），socket 权限默认 0600，
+使用 `--allow-uid` 时可共享给指定用户（0660）。
+
+**C ABI**（12 个导出函数 + 生成头文件）
+
+```sh
+cargo build -p com0com-capi --release
+# 头文件由 tools/header-gen 生成，CI 校验其与实现一致
+# crates/com0com-capi/include/com0com_capi.h
+```
+
+调用方按“打开 → 查询能力 → 操作 → 订阅事件 → 关闭”的顺序使用；
+每对端口的数据面仍然是内核 / PTY 链路，SDK 不转发串口数据。
 
 ---
 
 ## 已实现 vs. 待办（P2 特性）
 
 **已实现**
+- 分层 SDK：`com0com-core`（领域模型/能力位）→ `com0com-sdk`（Rust facade）→
+  C ABI（12 个导出函数 + 生成头文件）/ 本地 JSON-RPC 守护进程 `com0comd`；
+- Unix 用户态 PTY 后端：成对 PTY、原始 termios、非阻塞泵线程、链路符号链接、
+  波特率节流、噪声注入、溢出丢弃、状态持久化与 `--restore`/`--autosave`；
+- 守护进程安全边界：Unix socket 本地 IPC（不监听网络）、`SO_PEERCRED`/`getpeereid`
+  对端校验、`--allow-uid` 白名单、只允许打开受管端口的 monitor；
 - 混合驱动骨架、PDO 枚举、兼容 ID、`PORT_LINK`/`PORT_UNLINK` 引用计数与回收；
 - 完整 `IOCTL_SERIAL_*`（波特率/线路控制/字符/超时/握手/modem 状态/等待事件/统计/中断/流控等）；
 - 两端口数据转发、挂起读与 `WAIT_ON_MASK` 的取消安全实现；
-- `setupc` 用户态配置工具；共享协议与结构体；
+- `setupc` 用户态配置工具（Windows / Unix 同一命令界面）；共享协议与结构体；
 - `emu_br`（波特率时序仿真）：按 `baud` + 帧格式（半比特精确计数，支持 1.5 停止位）给写路径发放字节预算；
   **实现方式**：写侧短写限速（`Information` = 本次实际投递字节数），**无 staging 缓冲、无定时器/DPC**；
   读侧不限速。已知边界：调用方需重试短写；高频小写入靠 Q16 定点 carry 累积，不会饿死。
@@ -312,8 +402,9 @@ setupc set   <id> [same flags as add, minus --id/--port-*]
   安装 cancel routine 并复查 `Irp->Cancel`（消除“已取消但未回调 → IRP 泄漏”竞态）。
 
 **待实现**
-- 基于注册表的持久化配置（对标 `HKLM\...\com0com\Parameters`）；
-- 网络扩展（远程串口对）。
+- Windows 侧基于注册表的持久化配置（对标 `HKLM\...\com0com\Parameters`）；
+  当前持久化由 SDK/守护进程的状态文件提供；
+- 网络扩展（远程串口对）；
 
 ---
 
@@ -345,7 +436,9 @@ setupc set   <id> [same flags as add, minus --id/--port-*]
   `setupc add/remove/list`、双向数据传输、自动命名、删除后的设备/`SERIALCOMM` 清理均通过。
   复现见 [`tools/vm-test/`](tools/vm-test/README.md)。
 - 验证环境为 VMware + Win11 24H2 评估版；KMDF 1.33 要求 **Win11 24H2 / Server 2025 或更高**。
-- 配置持久化尚未实现：重启后串口对不会保留，需要重新 `setupc add`。
+- 配置持久化：Windows 驱动本身仍不持久化；SDK / `com0comd` 通过状态文件
+  （schema 1，原子写入，`--restore`/`--autosave`）恢复串口对，未运行守护进程时
+  重启后需重新 `setupc add`。
 - 内核 crate `Cargo.toml` 内含 `[profile.dev]/[profile.release] panic = "abort"`
   （内核不支持 unwind）。二者现已是独立工作区根，该 profile **会正常生效**，
   不再出现“profile 被忽略”的告警。

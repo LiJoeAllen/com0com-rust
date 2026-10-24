@@ -1,4 +1,8 @@
 # windows-drivers-rs: static CRT linkage for kernel-mode crates.
 # (wdk-build's configure_wdk_binary_build() adds /NODEFAULTLIB and /ENTRY.)
-[build]
+#
+# Scoped to Windows targets: the same workspace is now checked on Linux/macOS
+# (SDK core/backend-pty), where a global crt-static flag would break host
+# linking.
+[target.'cfg(windows)']
 rustflags = ["-C", "target-feature=+crt-static"]

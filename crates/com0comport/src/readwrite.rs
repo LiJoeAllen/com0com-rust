@@ -60,8 +60,11 @@ unsafe fn unlock_pair(pc: *mut PairContext, irql: KIRQL) {
 /// Every path that clears a `pending_*_irp` slot must therefore complete the
 /// IRP *only* if this returns `true`.
 ///
-/// Must be called after releasing the pair spinlock — the two locks are never
-/// held at the same time.
+/// Must be called after releasing the pair spinlock. When both locks are
+/// needed the order is fixed at pair -> cancel (the publish paths take the
+/// cancel spinlock while holding the pair lock); the cancel routine itself
+/// releases the cancel spinlock before taking the pair lock, so the order is
+/// never inverted.
 ///
 /// The generated WDK binding defines `PDRIVER_CANCEL` as
 /// `Option<unsafe extern "C" fn(...)>`, so `.is_some()` is the correct test.
@@ -197,36 +200,17 @@ pub unsafe fn handle_read(ext: *mut PortExtension, irp: PIRP) -> NTSTATUS {
         return wdk_sys::STATUS_INVALID_PARAMETER;
     }
 
-    // (a) Arm the cancel routine BEFORE the IRP becomes visible to any other
-    //     thread (it is not in the slot yet, so nothing can have taken it).
-    //     Doing this under the cancel spinlock is what closes the
-    //     "cancelled but our cancel routine never runs" race. No pair lock is
-    //     held here.
+    // Fast paths complete synchronously and never install a cancel routine:
+    // `IoCancelIrp` on an IRP without one only sets `Cancel` and leaves the
+    // completion to us, so the direct `IoCompleteRequest` below is safe.
     //
-    //     This ordering is also what makes the `(*irp).Cancel` read below safe:
-    //     the IRP cannot have been dequeued and completed by a peer write yet,
-    //     so it cannot have been recycled by the I/O manager (no UAF), and no
-    //     slot-based ownership check is needed in the cancelled branch — the
-    //     IRP is still entirely ours.
-    // Both cancel-spinlock functions are generated in wdk_sys::ntddk.
-    let mut cancel_irql: KIRQL = 0;
-    IoAcquireCancelSpinLock(&mut cancel_irql);
-    if (*irp).Cancel != 0 {
-        IoReleaseCancelSpinLock(cancel_irql);
-        (*irp).IoStatus.Information = 0;
-        (*irp).IoStatus.__bindgen_anon_1.Status = wdk_sys::STATUS_CANCELLED;
-        IoCompleteRequest(irp, IO_NO_INCREMENT as i8);
-        return wdk_sys::STATUS_CANCELLED;
-    }
-    set_cancel_routine(irp, Some(cancel_pending_irp));
-    IoReleaseCancelSpinLock(cancel_irql);
-
-    // (b) Decide under the pair lock. From here on another thread may take the
-    //     IRP at any moment, so every branch that completes it synchronously
-    //     must first win ownership back with `claim_irp`, and the branch that
-    //     publishes it must mark it pending first (otherwise a peer could
-    //     complete — and the I/O manager recycle — an IRP we are still
-    //     dereferencing).
+    // The pending path publishes under BOTH locks (pair -> cancel, a fixed
+    // order nobody violates in reverse): the cancel lock keeps `IoCancelIrp`
+    // out while we mark pending, install the routine and store the IRP in the
+    // slot, so by the time a cancel can be dispatched the IRP is guaranteed to
+    // be in the slot. The old arm-first order left a window where the cancel
+    // routine completed (and the I/O manager recycled) an IRP this function
+    // was still about to publish.
     let irql = lock_pair(pc);
     let avail = (*pc).port[idx].rx.available_to_read();
     if avail > 0 {
@@ -236,32 +220,42 @@ pub unsafe fn handle_read(ext: *mut PortExtension, irp: PIRP) -> NTSTATUS {
         (*pc).port[idx].stats.ReceivedCount =
             (*pc).port[idx].stats.ReceivedCount.wrapping_add(n as u32);
         unlock_pair(pc, irql);
-        if claim_irp(irp) {
-            (*irp).IoStatus.Information = n as u64;
-            (*irp).IoStatus.__bindgen_anon_1.Status = wdk_sys::STATUS_SUCCESS;
-            IoCompleteRequest(irp, IO_NO_INCREMENT as i8);
-            wdk_sys::STATUS_SUCCESS
-        } else {
-            // Cancellation won the race and is completing the IRP right now.
-            wdk_sys::STATUS_PENDING
-        }
+        (*irp).IoStatus.Information = n as u64;
+        (*irp).IoStatus.__bindgen_anon_1.Status = wdk_sys::STATUS_SUCCESS;
+        IoCompleteRequest(irp, IO_NO_INCREMENT as i8);
+        wdk_sys::STATUS_SUCCESS
     } else if (*pc).port[idx].pending_read_irp != 0 {
         // Another read is already pended: complete this one empty.
         unlock_pair(pc, irql);
-        if claim_irp(irp) {
-            (*irp).IoStatus.Information = 0;
-            (*irp).IoStatus.__bindgen_anon_1.Status = wdk_sys::STATUS_SUCCESS;
-            IoCompleteRequest(irp, IO_NO_INCREMENT as i8);
-            wdk_sys::STATUS_SUCCESS
-        } else {
-            wdk_sys::STATUS_PENDING
-        }
+        (*irp).IoStatus.Information = 0;
+        (*irp).IoStatus.__bindgen_anon_1.Status = wdk_sys::STATUS_SUCCESS;
+        IoCompleteRequest(irp, IO_NO_INCREMENT as i8);
+        wdk_sys::STATUS_SUCCESS
     } else {
-        // Publish: mark pending while still holding the pair lock, so the IRP
-        // cannot be completed before it is marked (use-after-free).
+        // Publish. Holding the cancel spinlock makes "check Cancel, install the
+        // routine, mark pending, store the slot" atomic with respect to
+        // `IoCancelIrp`; holding the pair lock makes it atomic with respect to
+        // the peer writer, which is what lets us trust `avail == 0` above.
+        // Both cancel-spinlock functions are generated in wdk_sys::ntddk.
+        let mut cancel_irql: KIRQL = 0;
+        IoAcquireCancelSpinLock(&mut cancel_irql);
+        if (*irp).Cancel != 0 {
+            // Cancelled before we armed anything: we are the only owner (no
+            // routine is installed), so complete it ourselves.
+            IoReleaseCancelSpinLock(cancel_irql);
+            unlock_pair(pc, irql);
+            (*irp).IoStatus.Information = 0;
+            (*irp).IoStatus.__bindgen_anon_1.Status = wdk_sys::STATUS_CANCELLED;
+            IoCompleteRequest(irp, IO_NO_INCREMENT as i8);
+            return wdk_sys::STATUS_CANCELLED;
+        }
+        set_cancel_routine(irp, Some(cancel_pending_irp));
+        // Mark pending before publishing so a peer that picks the IRP up at
+        // once cannot hand the I/O manager a non-pending IRP to recycle.
         // The WDK inline marks the current stack location's Control field.
         mark_irp_pending(irp);
         (*pc).port[idx].pending_read_irp = irp as u64;
+        IoReleaseCancelSpinLock(cancel_irql);
         unlock_pair(pc, irql);
         // The IRP is owned by the slot now; do not touch it again.
         wdk_sys::STATUS_PENDING
@@ -327,7 +321,11 @@ pub unsafe fn handle_write(ext: *mut PortExtension, irp: PIRP) -> NTSTATUS {
     if params.emu_br != 0 && allowed != 0 {
         // KeQueryInterruptTime is a header macro; the generated callable
         // equivalent is KeQueryInterruptTimePrecise, also returning 100ns units.
-        let now = KeQueryInterruptTimePrecise(ptr::null_mut());
+        // Its second argument is `_Out_ PULONG64` — the kernel writes the
+        // timestamp through it, so NULL is not an option: that was the 0xA
+        // write-to-0 bugcheck at DISPATCH_LEVEL in v8.
+        let mut stamp: u64 = 0;
+        let now = KeQueryInterruptTimePrecise(&mut stamp);
         let lc = (*pc).port[idx].line_control; // [StopBits, Parity, WordLength]
         let half_bits = frame_half_bits(lc[2], lc[1], lc[0]);
         let mut pacer = LinePacer {
@@ -491,8 +489,9 @@ pub unsafe fn cancel_all(ext: *mut PortExtension) {
 /// Default cancel routine for pended read / WAIT_ON_MASK IRPs.
 ///
 /// The I/O manager calls this with the cancel spinlock held; it is released
-/// first (`(*irp).CancelIrql`) so that the pair lock can be taken legally (the
-/// two locks are never held at the same time).
+/// first (`(*irp).CancelIrql`) before the pair lock is taken. The lock order is
+/// fixed at pair -> cancel (the publish paths hold the pair lock when acquiring
+/// the cancel spinlock), so releasing it here keeps the order one-way.
 ///
 /// **Ownership:** being dispatched means `IoCancelIrp` already took the cancel
 /// routine, so we are the sole owner and must always complete — the slot is

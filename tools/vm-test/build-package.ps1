@@ -8,6 +8,10 @@
 
         <OutputDir>\bus\*.inf|sys|cat
         <OutputDir>\setupc.exe
+        <OutputDir>\com0comd.exe
+        <OutputDir>\sdk-smoke.exe
+        <OutputDir>\capi-smoke.exe
+        <OutputDir>\com0com_capi.dll
         <OutputDir>\devcon.exe
         <OutputDir>\WDRLocalTestCert.cer
         <OutputDir>\SHA256SUMS.txt
@@ -164,6 +168,14 @@ if ($Configuration -eq 'release') { $releaseArg = @('--release') }
 Step '构建 setupc（根 workspace）'
 Invoke-Checked 'cargo' (@('build', '-p', 'com0com-setupc') + $releaseArg) $repo
 
+Step '构建 SDK/daemon 工具（根 workspace）'
+Invoke-Checked 'cargo' (@('build', '-p', 'com0com-daemon', '-p', 'com0com-sdk-smoke', '-p', 'com0com-capi-smoke') + $releaseArg) $repo
+
+# 单独构建 C ABI 动态库：上面的命令会为冒烟测试启用 fake feature，
+# 这里不带 feature 重建，保证分发的 DLL 只有真实后端。
+Step '构建 C ABI 动态库（根 workspace）'
+Invoke-Checked 'cargo' (@('build', '-p', 'com0com-capi') + $releaseArg) $repo
+
 Step '构建 com0combus（KMDF，独立 workspace）'
 Invoke-Checked 'cargo' (@('wdk', 'build') + $releaseArg) (Join-Path $repo 'crates\com0combus')
 
@@ -184,6 +196,13 @@ Copy-DriverPackage $portPackage (Join-Path $OutputDir 'bus')
 $setupc = Join-Path $repo "target\$Configuration\setupc.exe"
 if (-not (Test-Path $setupc)) { throw "找不到 setupc 构建产物: $setupc" }
 Copy-Item $setupc (Join-Path $OutputDir 'setupc.exe') -Force
+
+$binaries = @('com0comd.exe', 'sdk-smoke.exe', 'capi-smoke.exe', 'com0com_capi.dll')
+foreach ($name in $binaries) {
+    $path = Join-Path $repo "target\$Configuration\$name"
+    if (-not (Test-Path $path)) { throw "找不到构建产物: $path" }
+    Copy-Item $path (Join-Path $OutputDir $name) -Force
+}
 
 $devcon = Find-Devcon
 Copy-Item $devcon (Join-Path $OutputDir 'devcon.exe') -Force

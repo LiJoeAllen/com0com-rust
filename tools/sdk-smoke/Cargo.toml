@@ -1,0 +1,17 @@
+[package]
+name = "com0com-sdk-smoke"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Self-contained SDK smoke test (fake backend, no driver required)"
+
+[dependencies]
+com0com-core = { workspace = true, features = ["fake"] }
+com0com-sdk = { workspace = true, features = ["fake"] }
+
+[[bin]]
+name = "sdk-smoke"
+path = "src/main.rs"
+
+[lints]
+workspace = true

@@ -1,0 +1,22 @@
+[package]
+name = "com0com-capi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "C ABI for the com0com SDK (com0com_capi dynamic library, generated header)"
+
+[lib]
+name = "com0com_capi"
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[dependencies]
+com0com-core = { workspace = true }
+com0com-sdk = { workspace = true }
+
+[features]
+default = []
+# Exposes the in-memory backend so the C ABI smoke test runs without a driver.
+fake = ["com0com-sdk/fake"]
+
+[lints]
+workspace = true

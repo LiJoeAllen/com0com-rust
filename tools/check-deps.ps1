@@ -41,6 +41,25 @@ $makefiles = @(
     @{ Name = 'com0comport/Makefile.toml'; Path = (Join-Path $RepoRoot 'crates\com0comport\Makefile.toml') }
 )
 
+# 根 workspace 的普通成员（SDK/backend/工具）：它们继承根 workspace，不需要
+# [workspace.package]，但包内依赖必须使用 workspace = true 或本地 path。
+$memberManifests = @(
+    @{ Name = 'com0com-core';        Path = (Join-Path $RepoRoot 'crates\com0com-core\Cargo.toml') },
+    @{ Name = 'com0com-backend-win'; Path = (Join-Path $RepoRoot 'crates\com0com-backend-win\Cargo.toml') },
+    @{ Name = 'com0com-backend-pty'; Path = (Join-Path $RepoRoot 'crates\com0com-backend-pty\Cargo.toml') },
+    @{ Name = 'com0com-backend-stub'; Path = (Join-Path $RepoRoot 'crates\com0com-backend-stub\Cargo.toml') },
+    @{ Name = 'com0com-sdk';         Path = (Join-Path $RepoRoot 'crates\com0com-sdk\Cargo.toml') },
+    @{ Name = 'com0com-ipc';         Path = (Join-Path $RepoRoot 'crates\com0com-ipc\Cargo.toml') },
+    @{ Name = 'com0com-daemon';      Path = (Join-Path $RepoRoot 'crates\com0com-daemon\Cargo.toml') },
+    @{ Name = 'com0com-capi';        Path = (Join-Path $RepoRoot 'crates\com0com-capi\Cargo.toml') },
+    @{ Name = 'setupc';              Path = (Join-Path $RepoRoot 'tools\setupc\Cargo.toml') },
+    @{ Name = 'sdk-smoke';           Path = (Join-Path $RepoRoot 'tools\sdk-smoke\Cargo.toml') },
+    @{ Name = 'capi-smoke';          Path = (Join-Path $RepoRoot 'tools\capi-smoke\Cargo.toml') },
+    @{ Name = 'header-gen';          Path = (Join-Path $RepoRoot 'tools\header-gen\Cargo.toml') }
+)
+
+$allManifests = @($manifests) + @($memberManifests)
+
 # 把一行依赖值转成条目。支持三种形式：
 #   "0.61"                       → Version
 #   { path = "..." }             → Path（第一方本地依赖）
@@ -300,14 +319,14 @@ function Sync-MakefileVersion {
     [void]$Changes.Add("${Manifest}: 内嵌 wdk-build 版本同步为 `"$Version`"")
 }
 
-$manifests | ForEach-Object {
+$allManifests | ForEach-Object {
     if (-not (Test-Path -LiteralPath $_.Path)) {
         throw "找不到清单：$($_.Path)"
     }
 }
 
 $byManifest = @{}
-foreach ($m in $manifests) {
+foreach ($m in $allManifests) {
     $byManifest[$m.Name] = Read-DependencySections -Manifest $m.Path
 }
 
@@ -351,7 +370,7 @@ if ($Fix) {
         foreach ($change in $changes) { Write-Host "  - $change" }
         # 重新读取，按修复后的内容做一致性校验。
         $byManifest = @{}
-        foreach ($m in $manifests) {
+        foreach ($m in $allManifests) {
             $byManifest[$m.Name] = Read-DependencySections -Manifest $m.Path
         }
     }
@@ -397,7 +416,7 @@ foreach ($mf in $makefiles) {
     }
 }
 
-foreach ($m in $manifests) {
+foreach ($m in $allManifests) {
     foreach ($e in $byManifest[$m.Name]) {
         if ($e.Section -eq 'workspace.dependencies') {
             if (-not $e.Source) { continue }   # 本地 path 依赖不参与来源比对

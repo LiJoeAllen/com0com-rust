@@ -9,7 +9,8 @@ tools\vm-test\
   run-vm-test.ps1          宿主机编排：快照/启动 VM、复制、安装、重启、收集日志
   guest\install-bus.ps1    客户机：校验签名环境、导入测试证书、安装 com0combus
   guest\install-port.ps1   客户机：清理旧 com0comport 包并安装本次构建
-  guest\check-pairs.ps1    客户机：串口对生命周期与双向传输断言
+  guest\check-pairs.ps1    客户机：串口对生命周期、SDK/C ABI/RPC 与双向传输断言
+  guest\check-pairs-unix.sh Linux/macOS：PTY 后端、daemon 与状态恢复断言
 ```
 
 ## 前置条件
@@ -62,13 +63,19 @@ powershell -ExecutionPolicy Bypass -File tools\vm-test\build-package.ps1 `
 bus\com0combus.inf|sys|cat
 bus\com0comport.inf|sys|cat
 setupc.exe
+com0comd.exe
+sdk-smoke.exe
+capi-smoke.exe
+com0com_capi.dll
 devcon.exe
 WDRLocalTestCert.cer
 SHA256SUMS.txt
 ```
 
-脚本会依次构建 `setupc`、`com0combus`、`com0comport`；并行度默认 2
-（`-Jobs` / `VM_TEST_JOBS` / `CARGO_BUILD_JOBS` 依次覆盖），避免低配机因并行编译内核 crate 而卡死。
+脚本会依次构建 `setupc`、SDK/daemon 工具、C ABI 动态库、`com0combus`、`com0comport`；
+并行度默认 2（`-Jobs` / `VM_TEST_JOBS` / `CARGO_BUILD_JOBS` 依次覆盖），
+避免低配机因并行编译内核 crate 而卡死。C ABI 库在冒烟工具之后单独构建一次，
+确保分发的 DLL 不含 `fake` feature。
 
 ## 2. 执行验证
 
@@ -88,7 +95,7 @@ powershell -ExecutionPolicy Bypass -File tools\vm-test\run-vm-test.ps1 `
 |---|---|---|---|
 | `-VmxPath` | 环境或参数 | `VMRUN_VMX_PATH` | 测试虚拟机 `.vmx` 路径 |
 | `-GuestUser` / `-GuestPassword` | 环境或参数 | `VMRUN_GUEST_USER` / `VMRUN_GUEST_PASSWORD` | 客户机管理员凭据（vmrun 使用） |
-| `-SnapshotName` | 否 | `VMRUN_SNAPSHOT_NAME` | 指定时先关机回滚快照再启动；快照必须处于关机状态 |
+| `-SnapshotName` | 否 | `VMRUN_SNAPSHOT_NAME` | 指定时先关机回滚快照再启动；快照必须处于关机状态，带内存的快照会被脚本直接拒绝 |
 | `-Configuration` | 否 | `VM_TEST_CONFIGURATION` | `debug`（默认）或 `release` |
 | `-PackageDir` | 否 | `VM_TEST_PACKAGE_DIR` | 默认 `target\vm-test-package` |
 | `-ResultsDir` | 否 | `VM_TEST_RESULTS_DIR` | 默认 `target\vm-test-results\<时间戳>` |
@@ -96,7 +103,7 @@ powershell -ExecutionPolicy Bypass -File tools\vm-test\run-vm-test.ps1 `
 | `-VmrunPath` | 否 | `VMRUN_PATH` | 默认从 PATH 或 `Program Files\VMware\VMware Workstation` 查找 |
 | `-SkipBuild` | 否 | — | 跳过构建，直接使用现有测试包 |
 | `-SkipReboot` | 否 | — | 安装后不重启（默认重启，确保新驱动重新加载） |
-| `-BootTimeoutSec` | 否 | `VM_TEST_BOOT_TIMEOUT_SEC` | 等待客户机就绪的超时，默认 600 秒（冷启动可能超过 5 分钟） |
+| `-BootTimeoutSec` | 否 | `VM_TEST_BOOT_TIMEOUT_SEC` | 等待客户机就绪的超时，默认 1200 秒（繁忙主机冷启动可能超过 10 分钟） |
 | `-Jobs` | 否 | `VM_TEST_JOBS` → `CARGO_BUILD_JOBS` | 传给 cargo 的 `CARGO_BUILD_JOBS`，默认 2 |
 
 指定 `-SnapshotName` 时，如果虚拟机正在运行，脚本会先 `vmrun stop ... hard`
@@ -104,13 +111,15 @@ powershell -ExecutionPolicy Bypass -File tools\vm-test\run-vm-test.ps1 `
 
 执行流程：
 
-1. 可选地回滚并启动虚拟机，等待 VMware Tools 与 PowerShell 就绪；
+1. 可选地回滚并启动虚拟机，等待 VMware Tools 与 PowerShell 就绪（回滚前检查 `.vmsd`，
+   带内存状态的快照会被直接拒绝）；
 2. 把测试包（`bus\`、`setupc.exe`、`devcon.exe`、证书、`SHA256SUMS.txt`）与客户机脚本复制到 `C:\com0com-vmtest`；
 3. `install-bus.ps1`：校验管理员/Secure Boot/testsigning（未开启则自动开启并返回退出码 2，宿主机重启后重跑）、导入测试证书、删除旧总线设备树与所有 `com0combus` 包、`devcon install` 一个全新总线实例、校验设备状态与运行中哈希；
 4. `install-port.ps1`：删除 DriverStore 里所有旧的 `com0comport` 包，再添加本次构建，并校验 DriverStore 中的 `com0comport.sys` 哈希；
 5. 重启客户机并等待就绪；
 6. `check-pairs.ps1`：创建/删除串口对、双向传输、自动命名、清理，并校验**运行中的驱动哈希**；
 7. 把日志拷回宿主机的 `target\vm-test-results\<时间戳>\`，解析 `RESULT|` 行，失败时退出码为 1。
+   客户机未就绪或本次未执行 `check-pairs.ps1` 时直接判 FAIL，不解析客户机遗留日志。
 
 `vmrun` 的凭据参数必须放在命令前（`-gu`/`-gp`）。`runProgramInGuest` 不返回 stdout，
 因此所有客户机脚本都写日志文件，由宿主机拷回后分析。
@@ -127,13 +136,30 @@ powershell -ExecutionPolicy Bypass -File tools\vm-test\run-vm-test.ps1 `
 | 删除 | `setupc remove 0`；端口从 `GetPortNames()` 消失；设备变 `CM_PROB_PHANTOM`；`SERIALCOMM` 条目被清除 |
 | 第二对 | id 5 / COM20/COM21；双向 1024 字节一致 |
 | 自动命名 | 不指定名字创建 id 7；两个端口拿到**不同**的 `COMx`；删除后清理干净 |
+| SDK / C ABI | `sdk-smoke --fake/--native`、`capi-smoke --self-test/--native`、C ABI DLL 打包 |
+| daemon / RPC | `com0comd selftest`；启动 `--autosave`、经命名管道跑 `sdk-smoke --daemon`；停止后 `--restore` 重建 pair 9（COM25/26） |
 | 收尾 | `setupc list` 显示 `(no pairs)` |
 
 固定使用 pair id 0/5/7 与 COM15/16/20/21，这些名字必须在客户机空闲。
 
+### Linux / macOS（PTY）
+
+Unix 不使用内核驱动，直接用 `check-pairs-unix.sh` 验证用户态 PTY、daemon 与状态恢复：
+
+```bash
+cargo build -p com0com-setupc -p com0com-daemon -p com0com-sdk-smoke
+tools/vm-test/guest/check-pairs-unix.sh --base-dir target/debug \
+  --log target/vm-test-results/unix-$(date -u +%Y%m%d-%H%M%S)/check-pairs-unix.log
+```
+
+脚本在临时目录内隔离 `COM0COM_DEV_DIR` / `COM0COM_ENDPOINT` / `COM0COM_STATE`，
+覆盖双向传输、标签与符号链接、波特率/噪声/overrun、能力位拒绝、SDK Monitor/事件、
+daemon 的 `--autosave`/`--restore`。CI 的同名作业默认不运行，需手动触发
+`workflow_dispatch` 并设置仓库变量 `RUN_UNIX_E2E=true`。
+
 ## 4. 日志与排查
 
-- 客户机日志：`C:\com0com-vmtest\install-bus.log`、`install-port.log`、`check-pairs.log`
+- 客户机日志：`C:\com0com-vmtest\install-bus.log`、`install-port.log`、`check-pairs.log`、`com0comd.log`
 - 宿主机日志：`target\vm-test-results\<时间戳>\`
 - **驱动哈希不匹配**：旧 DriverStore 包未被删除；看 `install-port.log` 里的 `packages|`、`delete|`、`store|`。
   总线哈希不匹配时，从干净快照重来，或手动删除 `com0combus` 包后重装。
