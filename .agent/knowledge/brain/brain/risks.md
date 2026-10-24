@@ -42,23 +42,25 @@ last_refreshed: 2026-10-23
 
 ---
 type: risk
-status: active
-last_refreshed: 2026-10-24
+status: resolved
+last_refreshed: 2026-10-25
 ---
 
-# 风险：macOS PTY 运行时尚未实机验证
+# 风险：macOS PTY 运行时行为偏离（已实机验证）
 
 - 严重度：中
-- 影响：Linux（WSL2 + 静态 musl，非 root 51/51、root 60/60，含
+- 原影响：Linux（WSL2 + 静态 musl，非 root 51/51、root 60/60，含
   `/dev` 默认链接与 0600 状态文件，日志
   `target/vm-test-results/unix-wsl-20261024-0245/`）与 Windows VM（47/47，含
   SDK/C ABI/RPC、波特率仿真写路径与 `--restore`/`--autosave`，日志
-  `target/vm-test-results/20261024-034210/`）均已实机通过；macOS 目前只做了
+  `target/vm-test-results/20261024-034210/`）均已实机通过；macOS 曾只做
   交叉目标编译检查，`ptsname`/符号链接权限/termios 运行时行为未执行。
-- 缓解：macOS 交叉 clippy 通过；共享 `/dev` 不再 chmod，用户/root 的默认状态与
-  socket 路径已分离，状态文件 0600、用户目录 0700；CI `unix-e2e`
-  （workflow_dispatch + `RUN_UNIX_E2E=true`）准备就绪，需在 macOS 主机或
-  经授权的 CI 上运行 `check-pairs-unix.sh`。
+- 解决：CI `unix-e2e` 在 `macos-26-arm64`（Apple Silicon）实机通过
+  `check-pairs-unix.sh`：非 root 52/52、root 62/62，覆盖
+  `/dev/cu.com0com-*`、`/dev/tty.com0com-*` 别名、`/dev/ttys*` 目标与双向
+  传输；macOS 宿主 `cargo test` 同时全绿。日志
+  `target/vm-test-results/macos-20261024-1557/`，CI run
+  https://github.com/LiJoeAllen/com0com-rust/actions/runs/40109316748 。
 - 触发信号：macOS `ptsname`/符号链接权限或 termios 行为偏离。
 
 ---

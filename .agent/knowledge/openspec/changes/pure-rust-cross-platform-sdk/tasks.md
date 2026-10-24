@@ -60,7 +60,10 @@
 - [x] VM 编排失败闭合：客户机未就绪或本次未执行 `check-pairs.ps1` 时直接判 FAIL，
       不再解析客户机遗留日志；就绪超时默认提高到 1200 秒；回滚前校验快照类型，
       带内存状态的快照直接拒绝（实测回滚后会停在锁屏且 Tools 不起）
-- [ ] macOS PTY E2E（CI `unix-e2e` workflow_dispatch，待运行）
+- [x] macOS PTY E2E（CI `unix-e2e` workflow_dispatch，`macos-26-arm64`/Apple Silicon：
+      非 root 52/52、root 62/62，覆盖 `/dev/cu.com0com-*`、`/dev/tty.com0com-*`
+      别名与 `/dev/ttys*` 双向传输；日志
+      `target/vm-test-results/macos-20261024-1557/`，CI run 40109316748）
 
 ## 验证
 
@@ -69,13 +72,14 @@
 - [x] `cargo test --workspace`（Windows 宿主）
 - [x] Linux-musl 测试二进制在 WSL2 全部通过（15 套件 / 175 项，日志
       `target/vm-test-results/linux-tests-20261024-031558.log`）
-- [ ] macOS 宿主 `cargo test`（目前仅交叉编译检查，随 macOS E2E 一并执行）
+- [x] macOS 宿主 `cargo test`（CI `check + test (macos-latest)` 全绿，run 40109316748）
 - [x] `pwsh tools/check-deps.ps1 -Fix` 无 diff
 - [x] 纯 Rust 源码检查（无手写 C/C++）
 - [x] Windows VM 31 项 + SDK/C ABI/RPC 冒烟（实际 47 项断言全过，含波特率
       仿真写路径，日志 `target/vm-test-results/20261024-034210/`）
 - [x] Linux PTY E2E（WSL2：非 root 51/51 + root 60/60，日志
       `target/vm-test-results/unix-wsl-20261024-0245/`）
-- [ ] macOS PTY E2E（CI workflow_dispatch）
+- [x] macOS PTY E2E（CI workflow_dispatch，非 root 52/52 + root 62/62，
+      日志 `target/vm-test-results/macos-20261024-1557/`）
 - [x] 安全复查与文档一致性（无网络监听、`serial.open` 白名单、root/用户默认路径、
       socket 目录 0700、状态文件 0600、C ABI 文档命令已校正）

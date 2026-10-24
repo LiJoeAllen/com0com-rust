@@ -37,7 +37,9 @@ last_refreshed: 2026-10-24
   波特率仿真写路径与 `--restore`/`--autosave` 实测通过（日志
   `target/vm-test-results/20261024-034210/`）。macOS 路径/权限审计已完成
   （共享 `/dev` 不 chmod、状态文件 0600、非 root 目录 0700、relabel 回滚不删
-  普通文件）。仅剩 macOS PTY E2E 需在 macOS 主机或授权的 CI
-  `workflow_dispatch` 上执行。
+  普通文件）。macOS PTY E2E 已在 CI `macos-26-arm64`（Apple Silicon）实机通过：
+  非 root 52/52、root 62/62（`/dev/cu.com0com-*`、`tty.` 别名、`/dev/ttys*`
+  双向传输），macOS 宿主 `cargo test` 全绿，日志
+  `target/vm-test-results/macos-20261024-1557/`（run 40109316748）。
 - 验收：`openspec/changes/pure-rust-cross-platform-sdk/tasks.md` 全绿。
 - 关联：`[[sdk-and-backends]]`、`[[architecture]]`、`[[risks]]`。

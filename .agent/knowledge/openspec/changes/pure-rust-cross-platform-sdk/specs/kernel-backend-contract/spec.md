@@ -50,4 +50,7 @@
 - 现状：Windows backend、Unix PTY backend、SDK/daemon/C ABI 已实现；Linux PTY
   E2E 非 root 51/51、root 60/60（WSL2 静态 musl，root 段覆盖 `/dev` 默认链接），
   Windows VM E2E 47/47（2026-10-24，`target/vm-test-results/20261024-034210/`）；
-  仅剩 macOS PTY E2E 实机结果。见 `changes/pure-rust-cross-platform-sdk/tasks.md`。
+  macOS PTY E2E 在 CI `macos-26-arm64`（Apple Silicon）非 root 52/52、root 62/62，
+  覆盖 `/dev/cu.com0com-*` 与 `tty.` 别名及 `/dev/ttys*` 双向传输，macOS 宿主
+  `cargo test` 全绿（日志 `target/vm-test-results/macos-20261024-1557/`，
+  run 40109316748）。见 `changes/pure-rust-cross-platform-sdk/tasks.md`。
