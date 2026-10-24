@@ -1,0 +1,5 @@
+# The header snapshot check is byte-exact; Windows checkouts must not add CR.
+crates/com0com-capi/include/com0com_capi.h text eol=lf
+
+# Unix E2E scripts run from CI checkouts and must keep LF and the exec bit.
+tools/vm-test/guest/*.sh text eol=lf

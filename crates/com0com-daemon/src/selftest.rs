@@ -38,23 +38,30 @@ fn unique() -> String {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
-        .as_nanos();
+        .as_nanos() as u32;
     format!(
-        "{}-{}-{nanos}",
+        "{:x}{:x}{nanos:x}",
         std::process::id(),
         COUNTER.fetch_add(1, Ordering::Relaxed)
     )
 }
 
-fn endpoint(dir: &Path, tag: &str) -> (String, PathBuf) {
+fn scratch_dir() -> PathBuf {
+    std::env::temp_dir().join(format!("c0c-st-{}", unique()))
+}
+
+// macOS stores Unix sockets in `sun_path[104]`, so keep the whole endpoint
+// short: long temp directories plus a descriptive prefix overflow the limit.
+fn endpoint(dir: &Path) -> (String, PathBuf) {
+    let tag = dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("c0c-st");
     if cfg!(windows) {
-        (
-            format!(r"\\.\pipe\com0comd-selftest-{tag}"),
-            dir.join("state.json"),
-        )
+        (format!(r"\\.\pipe\{tag}"), dir.join("state.json"))
     } else {
         (
-            dir.join("control.sock").to_string_lossy().into_owned(),
+            dir.join("ctl.sock").to_string_lossy().into_owned(),
             dir.join("state.json"),
         )
     }
@@ -70,10 +77,9 @@ fn params(a: &str, b: &str) -> PairParams {
 
 /// Returns the number of checks performed.
 pub fn selftest() -> Result<usize, SdkError> {
-    let tag = unique();
-    let dir = std::env::temp_dir().join(format!("com0comd-selftest-{tag}"));
+    let dir = scratch_dir();
     std::fs::create_dir_all(&dir).map_err(|error| SdkError::Io(error.to_string()))?;
-    let (endpoint, state_path) = endpoint(&dir, &tag);
+    let (endpoint, state_path) = endpoint(&dir);
 
     let result = run(&endpoint, &state_path);
     let _ = std::fs::remove_dir_all(&dir);
@@ -90,7 +96,7 @@ fn run(endpoint: &str, state_path: &Path) -> Result<usize, SdkError> {
 
     let daemon = crate::spawn(config.clone(), Arc::new(FakeBackend::new()))?;
     check.that(
-        daemon.endpoint().contains("com0comd-selftest"),
+        daemon.endpoint() == endpoint,
         "listener reports the requested endpoint",
     )?;
 
@@ -250,4 +256,21 @@ fn run(endpoint: &str, state_path: &Path) -> Result<usize, SdkError> {
     )?;
 
     Ok(check.count)
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unix_endpoint_fits_in_sun_path() {
+        let dir = scratch_dir();
+        let (endpoint, _) = endpoint(&dir);
+        // macOS `sun_path` is 104 bytes including the NUL terminator.
+        assert!(
+            endpoint.len() <= 100,
+            "endpoint is {} bytes: {endpoint}",
+            endpoint.len()
+        );
+    }
 }

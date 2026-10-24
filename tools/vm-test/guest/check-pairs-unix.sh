@@ -300,6 +300,38 @@ def read_up_to(fd, want, timeout):
     return bytes(out)
 
 
+def transfer(fd_a, fd_b, payload, timeout):
+    """边写边读：先写满再读会在 macOS 的 2 KiB PTY 缓冲上互相等待。"""
+    deadline = time.monotonic() + timeout
+    sent = 0
+    out = bytearray()
+    while (sent < len(payload) or len(out) < len(payload)) and time.monotonic() < deadline:
+        left = max(0.0, deadline - time.monotonic())
+        writable_fds = [fd_a] if sent < len(payload) else []
+        readable, writable, _ = select.select([fd_b], writable_fds, [], left)
+        if readable:
+            try:
+                chunk = os.read(fd_b, 4096)
+            except BlockingIOError:
+                chunk = b""
+            except OSError as error:
+                if error.errno in (11, 35):
+                    chunk = b""
+                else:
+                    raise
+            if chunk:
+                out.extend(chunk)
+        if writable:
+            try:
+                sent += os.write(fd_a, payload[sent:sent + 4096])
+            except BlockingIOError:
+                pass
+            except OSError as error:
+                if error.errno not in (11, 35):
+                    raise
+    return sent, bytes(out)
+
+
 def main():
     mode, a_path, b_path = sys.argv[1], sys.argv[2], sys.argv[3]
     size = int(sys.argv[4])
@@ -311,11 +343,13 @@ def main():
                 set_speed(fd_b, sys.argv[5])
             payload = bytes((i * 31 + 7) & 0xFF for i in range(size))
             start = time.monotonic()
-            sent = write_all(fd_a, payload, 30)
-            received = read_up_to(fd_b, sent, 30)
+            sent, received = transfer(fd_a, fd_b, payload, 30)
             elapsed = time.monotonic() - start
             if sent != size:
                 print(f"short-write sent={sent} want={size}")
+                return 1
+            if len(received) != size:
+                print(f"short-read received={len(received)} want={size}")
                 return 1
             if received != payload:
                 print(f"mismatch received={len(received)} want={size}")
@@ -394,7 +428,7 @@ check "daemon| started with --restore --autosave" "$([ $? -eq 0 ] && echo 1 || e
 check "daemon| control socket exists" "$([ -S "$SOCK" ] && echo 1 || echo 0)" "$SOCK"
 
 run_tool selftest "$COM0COMD" selftest
-check "daemon| selftest" "$([ "$RC" -eq 0 ] && echo 1 || echo 0)" "$(brief "$OUT")"
+check "daemon| selftest" "$([ "$RC" -eq 0 ] && echo 1 || echo 0)" "$(brief "$OUT")$(brief "$ERR")"
 
 # ---------------------------------------------------------------------------
 # 建对、标签与符号链接
@@ -419,11 +453,12 @@ setupc list0 list
 check "list| pair 0 visible" "$(grep -Eq '^0[[:space:]]+A0[[:space:]]+B0' "$OUT" && echo 1 || echo 0)" "$(brief "$OUT")"
 
 # 链接目录中的普通文件绝不能被符号链接覆盖，这是防止误删用户数据的安全线。
-printf 'guard' > "$DEV_DIR/GUARD"
+GUARD_LINK="$(port_link GUARD)"
+printf 'guard' > "$GUARD_LINK"
 setupc guard add --id 3 --port-a GUARD --port-b G3B
 check "link| regular file blocks pair creation" "$([ "$RC" -ne 0 ] && echo 1 || echo 0)" "$(brief "$ERR")"
-check "link| regular file untouched" "$([ "$(cat "$DEV_DIR/GUARD" 2>/dev/null)" = "guard" ] && echo 1 || echo 0)"
-rm -f "$DEV_DIR/GUARD"
+check "link| regular file untouched" "$([ "$(cat "$GUARD_LINK" 2>/dev/null)" = "guard" ] && echo 1 || echo 0)" "$GUARD_LINK"
+rm -f "$GUARD_LINK"
 
 # ---------------------------------------------------------------------------
 # 数据传输

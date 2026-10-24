@@ -647,22 +647,37 @@ mod tests {
         assert!(all.iter().all(|byte| *byte != 0));
     }
 
+    fn set_output_speed(fd: RawFd, speed: libc::speed_t) {
+        let mut termios: libc::termios = unsafe { std::mem::zeroed() };
+        assert_eq!(unsafe { libc::tcgetattr(fd, &mut termios) }, 0);
+        assert_eq!(unsafe { libc::cfsetispeed(&mut termios, speed) }, 0);
+        assert_eq!(unsafe { libc::cfsetospeed(&mut termios, speed) }, 0);
+        assert_eq!(unsafe { libc::tcsetattr(fd, libc::TCSANOW, &termios) }, 0);
+    }
+
     #[test]
     fn pacer_accepts_large_speeds_immediately() {
+        // A fresh PTY defaults to B9600 (macOS does not inherit the caller's
+        // setting), which would make 1 KiB take about a second. Pin a fast
+        // speed so the assertion measures the pacer, not the default.
+        // B38400 is the highest speed musl's cfsetispeed accepts.
+        const FAST: libc::speed_t = libc::B38400;
+
         let mut pacer = Pacer::default();
-        let holder = {
-            let (master, target) = open_pty().unwrap();
-            let holder = open_slave(&target).unwrap();
-            unsafe {
-                libc::close(master);
-            }
-            holder
-        };
+        // Keep the master open: once it closes, Linux terms the slave hung up
+        // and tcgetattr returns EIO, which would silently disable pacing.
+        let (master, target) = open_pty().unwrap();
+        let holder = open_slave(&target).unwrap();
+        set_output_speed(holder, FAST);
         let stop = AtomicBool::new(false);
         let started = Instant::now();
-        pacer.pace(holder, &[0u8; 64], &stop);
-        assert!(started.elapsed() < Duration::from_millis(50));
-        unsafe { libc::close(holder) };
+        pacer.pace(holder, &[0u8; 1024], &stop);
+        // At B38400 this takes ~267 ms; at the B9600 default it would be ~1.07 s.
+        assert!(started.elapsed() < Duration::from_millis(600));
+        unsafe {
+            libc::close(holder);
+            libc::close(master);
+        }
     }
 
     #[test]

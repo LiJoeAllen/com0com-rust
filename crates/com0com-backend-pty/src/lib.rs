@@ -416,8 +416,18 @@ mod tests {
     };
 
     use super::PtyBackend;
+    use crate::links::{LinkConfig, LinkStyle};
 
     static NEXT: AtomicU32 = AtomicU32::new(1);
+
+    fn link_path(dir: &std::path::Path, label: &str) -> std::path::PathBuf {
+        let style = if cfg!(target_os = "macos") {
+            LinkStyle::MacOs
+        } else {
+            LinkStyle::Linux
+        };
+        LinkConfig::at(dir, style, 0o700).unwrap().link_path(label)
+    }
 
     fn backend() -> (PtyBackend, std::path::PathBuf) {
         let dir = std::env::temp_dir().join(format!(
@@ -503,7 +513,7 @@ mod tests {
     fn relabel_failure_rolls_back_without_touching_regular_files() {
         let (backend, dir) = backend();
         let created = backend.create_pair(None, &params("RA", "RB")).unwrap();
-        let occupied = dir.join("OCCUPIED");
+        let occupied = link_path(&dir, "OCCUPIED");
         std::fs::write(&occupied, b"keep me").unwrap();
 
         let mut updated = created.params.clone();
@@ -517,7 +527,7 @@ mod tests {
         assert_eq!(std::fs::read(&occupied).unwrap(), b"keep me");
         assert_eq!(backend.get_params(created.id).unwrap(), created.params);
         for label in ["RA", "RB"] {
-            let link = dir.join(label);
+            let link = link_path(&dir, label);
             let metadata = std::fs::symlink_metadata(&link).unwrap();
             assert!(
                 metadata.file_type().is_symlink(),
