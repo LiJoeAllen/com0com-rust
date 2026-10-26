@@ -187,28 +187,176 @@ fn clamp_pacer_bytes(bytes: u128) -> u32 {
     }
 }
 
-/// Flip one random bit in each selected byte of `buf`.
+/// 上游 com0com 的噪声概率分母：概率字段以 1/100_000_000 为单位。
 ///
-/// `prob` is expressed in 0.01% units (`0..=10000`), matching the
-/// `noise_probability` field of `Com0comPairParams`. `prob == 0` is a no-op,
-/// `prob >= 10000` corrupts every byte. Returns the number of corrupted bytes.
-pub fn inject_noise(rng: &mut Xorshift32, prob: u32, buf: &mut [u8]) -> usize {
-    if prob == 0 {
-        return 0;
+/// 比旧的 0.01% 单位更细，可直接表达上游 `--noise=1e-6` 这类小数概率。
+/// `0` 表示不注入，[`NOISE_PROBABILITY_ONE`] 表示每个字符都出错。
+pub const NOISE_PROBABILITY_ONE: u32 = 100_000_000;
+
+/// 一次 [`inject_line_noise`] 调用产生的错误统计。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct NoiseReport {
+    /// 数据被替换或翻转的字符数（起始位错误、坏字符运行、数据位错误）。
+    pub corrupted: u32,
+    /// 校验错误次数（累加到接收端的 `ParityErrorCount`）。
+    pub parity_errors: u32,
+    /// 帧错误次数（累加到接收端的 `FrameErrorCount`）。
+    pub frame_errors: u32,
+}
+
+impl NoiseReport {
+    /// 是否记录到任何线路错误（用于决定是否置 `SERIAL_EV_ERR`）。
+    pub fn has_errors(&self) -> bool {
+        self.corrupted != 0 || self.parity_errors != 0 || self.frame_errors != 0
     }
-    let mut corrupted: usize = 0;
-    for byte in buf.iter_mut() {
-        let hit = if prob >= 10000 {
-            true
-        } else {
-            rng.below(10000) < prob
-        };
-        if hit {
-            *byte ^= 1u8 << (rng.below(8) & 0x07);
-            corrupted += 1;
+}
+
+/// 归一化 `SERIAL_LINE_CONTROL.WordLength`：0 表示上电默认的 8 位。
+pub fn effective_word_length(word_length: u8) -> u8 {
+    if word_length == 0 {
+        8
+    } else {
+        word_length
+    }
+}
+
+/// 计算接收端的数据位掩码，等价于上游 com0com 的 `AllDataBits` 语义。
+///
+/// 默认（`all_data_bits == false`）把数据截断到两端字长的较小值，最多 8 位：
+/// 任意一端配置为 7 位时，读到的第 8 位都会被清零。`all_data_bits == true`
+/// 时保留全部 8 位，兼容只按 8 位处理数据的应用。掩码必须在上完噪声之后
+/// 应用，否则噪声可能把数据位重新置回来（上游也是这个顺序）。
+pub fn data_mask(all_data_bits: bool, local_word_length: u8, remote_word_length: u8) -> u8 {
+    if all_data_bits {
+        return 0xFF;
+    }
+    let bits = 8u8
+        .min(effective_word_length(local_word_length))
+        .min(effective_word_length(remote_word_length));
+    if bits >= 8 {
+        0xFF
+    } else {
+        (1u8 << bits) - 1
+    }
+}
+
+/// 就地套用 [`data_mask`]。`0xFF` 时直接返回，避免整块内存的无谓写入。
+pub fn apply_data_mask(buf: &mut [u8], mask: u8) {
+    if mask != 0xFF {
+        for byte in buf.iter_mut() {
+            *byte &= mask;
         }
     }
-    corrupted
+}
+
+/// 概率命中判定，沿用上游 `prob > RAND() % C0C_PROBABILITY_ONE` 的语义。
+fn noise_hits(rng: &mut Xorshift32, probability: u32) -> bool {
+    probability > rng.below(NOISE_PROBABILITY_ONE)
+}
+
+/// 生成一个坏字符：随机数据，并按上游规则随机附带校验/帧错误。
+fn garbage_char(parity: u8, report: &mut NoiseReport, rng: &mut Xorshift32) -> u8 {
+    if parity != 0 && rng.below(2) > 0 {
+        report.parity_errors += 1;
+    }
+    if rng.below(2) > 0 {
+        report.frame_errors += 1;
+    }
+    rng.next_u32() as u8
+}
+
+/// 模拟单个字符在线路上的一位故障，对应上游 `BrokeChar()`。
+///
+/// `word_length` / `parity` 取发送端的线路控制；`broke_chars` 是跨写入保持的
+/// “后续坏字符”计数器（上游 `brokeChars`）。起始位或停止位出错会把它设为
+/// `RAND() % 512`，随后最多 511 个字符直接变成坏字符，模拟一次线路干扰。
+fn broke_char(
+    rng: &mut Xorshift32,
+    probability: u32,
+    word_length: u8,
+    parity: u8,
+    broke_chars: &mut u16,
+    byte: &mut u8,
+    report: &mut NoiseReport,
+) {
+    if !noise_hits(rng, probability) {
+        return;
+    }
+    let word_length = effective_word_length(word_length);
+    let parity_bits = u32::from(parity != 0);
+    let slots = 1 + 1 + u32::from(word_length) + parity_bits;
+    let mut r = rng.below(slots);
+    if r == 0 {
+        // 起始位错误：当前字符变成坏字符，并开启一段连续坏字符。
+        *broke_chars = rng.below(512) as u16;
+        *byte = garbage_char(parity, report, rng);
+        report.corrupted += 1;
+        return;
+    }
+    r -= 1;
+    if r == 0 {
+        // 停止位错误：数据不变，但接收端看到帧错误，同样会牵连后续字符。
+        *broke_chars = rng.below(512) as u16;
+        report.frame_errors += 1;
+        return;
+    }
+    r -= 1;
+    if r < u32::from(word_length) {
+        // 数据位错误：翻转指定位；ODD/EVEN 校验会同时报校验错。
+        // 9 位字长时第 9 位在 u8 上不可见，与上游的截断行为一致。
+        if r < 8 {
+            *byte ^= 1u8 << r;
+        }
+        report.corrupted += 1;
+        if parity == 1 || parity == 2 {
+            report.parity_errors += 1;
+        }
+        return;
+    }
+    // 剩下的是校验位槽位：只有启用了校验才会命中。
+    report.parity_errors += 1;
+}
+
+/// 对一段待发送数据注入线路噪声，返回本次的错误统计。
+///
+/// * `probability` 以 [`NOISE_PROBABILITY_ONE`] 为分母，`0..=NOISE_PROBABILITY_ONE`。
+/// * `word_length`（0 视作 8）和 `parity`（`ODD_PARITY`/`EVEN_PARITY` 等）取自
+///   发送端线路控制，决定故障位槽位和各错误类型。
+/// * `broke_chars` 是调用方持久保存的坏字符计数器；跨调用保留，模拟上游
+///   一次干扰影响后续多个字符的行为。调用方应在端口空闲/关闭时清零。
+///
+/// 数据位掩码不在这里应用：调用方必须在上完噪声之后再调用
+/// [`apply_data_mask`]，顺序与上游一致。
+pub fn inject_line_noise(
+    rng: &mut Xorshift32,
+    probability: u32,
+    word_length: u8,
+    parity: u8,
+    broke_chars: &mut u16,
+    buf: &mut [u8],
+) -> NoiseReport {
+    let mut report = NoiseReport::default();
+    if probability == 0 && *broke_chars == 0 {
+        return report;
+    }
+    for byte in buf.iter_mut() {
+        if *broke_chars > 0 {
+            *broke_chars -= 1;
+            *byte = garbage_char(parity, &mut report, rng);
+            report.corrupted += 1;
+        } else {
+            broke_char(
+                rng,
+                probability,
+                word_length,
+                parity,
+                broke_chars,
+                byte,
+                &mut report,
+            );
+        }
+    }
+    report
 }
 
 /// Clamp a requested queue size (`SERIAL_QUEUE_SIZE.InSize` / `.OutSize`) into
@@ -449,47 +597,111 @@ mod tests {
     }
 
     #[test]
-    fn inject_noise_zero_prob_is_identity() {
+    fn line_noise_zero_probability_is_identity() {
         let mut rng = Xorshift32::new(1);
+        let mut broke_chars = 0u16;
         let mut buf = [0xA5u8; 32];
         let before = buf;
-        assert_eq!(inject_noise(&mut rng, 0, &mut buf), 0);
+        let report = inject_line_noise(&mut rng, 0, 8, 0, &mut broke_chars, &mut buf);
+        assert_eq!(report, NoiseReport::default());
+        assert!(!report.has_errors());
         assert_eq!(buf, before);
-        // Empty input is always a no-op.
+        assert_eq!(broke_chars, 0);
+        // 空输入即使在满概率下也不产生错误。
         let mut empty: [u8; 0] = [];
-        assert_eq!(inject_noise(&mut rng, 10000, &mut empty), 0);
+        let report = inject_line_noise(
+            &mut rng,
+            NOISE_PROBABILITY_ONE,
+            8,
+            2,
+            &mut broke_chars,
+            &mut empty,
+        );
+        assert!(!report.has_errors());
     }
 
     #[test]
-    fn inject_noise_full_prob_changes_every_byte() {
+    fn line_noise_full_probability_reports_all_fault_classes() {
         let mut rng = Xorshift32::new(99);
-        let mut buf = [0x00u8; 64];
-        let n = inject_noise(&mut rng, 10000, &mut buf);
-        assert_eq!(n, 64);
-        // Every byte differs from the original (exactly one bit flipped).
-        for b in buf.iter() {
-            assert_ne!(*b, 0x00);
-            assert_eq!(b.count_ones(), 1);
-        }
+        let mut broke_chars = 0u16;
+        let mut buf = [0x00u8; 4096];
+        // EVEN 校验：数据位错误和校验位错误都会报校验错。
+        let report = inject_line_noise(
+            &mut rng,
+            NOISE_PROBABILITY_ONE,
+            8,
+            2,
+            &mut broke_chars,
+            &mut buf,
+        );
+        assert!(report.corrupted > 0, "没有坏字符: {report:?}");
+        assert!(report.parity_errors > 0, "没有校验错误: {report:?}");
+        assert!(report.frame_errors > 0, "没有帧错误: {report:?}");
+        assert!(report.has_errors());
+        // 每个字符至少经历一次故障判定（坏字符运行中的字符除外，但它们
+        // 会以 corrupted 计入），所以三类计数之和不会少于字符数。
+        assert!(
+            report.corrupted + report.parity_errors + report.frame_errors >= 4096,
+            "错误计数偏少: {report:?}"
+        );
     }
 
     #[test]
-    fn inject_noise_is_reproducible_for_a_seed() {
-        let mut a = [0x5Au8; 128];
-        let mut b = [0x5Au8; 128];
-        let mut r1 = Xorshift32::new(0x00C0_FFEE);
-        let mut r2 = Xorshift32::new(0x00C0_FFEE);
-        let n1 = inject_noise(&mut r1, 500, &mut a);
-        let n2 = inject_noise(&mut r2, 500, &mut b);
-        assert_eq!(n1, n2);
+    fn line_noise_is_reproducible_for_a_seed() {
+        let run = |seed: u32| {
+            let mut rng = Xorshift32::new(seed);
+            let mut broke = 0u16;
+            let mut buf = [0x5Au8; 256];
+            let report = inject_line_noise(&mut rng, 5_000_000, 8, 1, &mut broke, &mut buf);
+            (buf, report, broke, rng.0)
+        };
+        let (a, ra, ba, sa) = run(0x00C0_FFEE);
+        let (b, rb, bb, sb) = run(0x00C0_FFEE);
         assert_eq!(a, b);
-        assert!(n1 <= 128);
-        // A different seed must (over 128 bytes at 5%) differ somewhere in
-        // practice; at minimum the generator states diverge.
-        let mut c = [0x5Au8; 128];
-        let mut r3 = Xorshift32::new(0x0BAD_F00D);
-        let _ = inject_noise(&mut r3, 500, &mut c);
-        assert_ne!(r1.0, r3.0);
+        assert_eq!(ra, rb);
+        assert_eq!(ba, bb);
+        assert_eq!(sa, sb);
+        // 不同种子必须产生不同的损坏模式。
+        let (c, rc, _, _) = run(0x0BAD_F00D);
+        assert_ne!(a, c);
+        assert!(rc.has_errors());
+    }
+
+    #[test]
+    fn broken_char_runs_consume_the_counter_before_new_faults() {
+        let mut rng = Xorshift32::new(7);
+        let mut broke_chars = 3u16;
+        let mut buf = [0x11u8; 8];
+        // 概率为 0 时不会触发新故障，只消费预置的 3 个坏字符。
+        let report = inject_line_noise(&mut rng, 0, 8, 0, &mut broke_chars, &mut buf);
+        assert_eq!(broke_chars, 0);
+        assert_eq!(report.corrupted, 3);
+        assert_eq!(&buf[3..], &[0x11u8; 5]);
+    }
+
+    #[test]
+    fn data_mask_matches_upstream_all_data_bits() {
+        // 默认截断到两端字长的较小值。
+        assert_eq!(data_mask(false, 7, 8), 0x7F);
+        assert_eq!(data_mask(false, 8, 7), 0x7F);
+        assert_eq!(data_mask(false, 5, 8), 0x1F);
+        assert_eq!(data_mask(false, 8, 8), 0xFF);
+        // 0 按 8 位处理，与未配置的线路控制一致。
+        assert_eq!(data_mask(false, 0, 0), 0xFF);
+        // AllDataBits 强制保留 8 位。
+        assert_eq!(data_mask(true, 5, 7), 0xFF);
+        // 9 位字长也不可能产生超过 u8 的掩码。
+        assert_eq!(data_mask(false, 9, 9), 0xFF);
+    }
+
+    #[test]
+    fn apply_data_mask_only_touches_high_bits() {
+        let mut buf = [0xFFu8, 0x80, 0x7F, 0x01];
+        apply_data_mask(&mut buf, 0x7F);
+        assert_eq!(buf, [0x7F, 0x00, 0x7F, 0x01]);
+        let mut all = [0xA5u8; 4];
+        apply_data_mask(&mut all, 0xFF);
+        assert_eq!(all, [0xA5u8; 4]);
     }
 
     #[test]
@@ -700,63 +912,61 @@ mod tests {
     }
 
     #[test]
-    fn inject_noise_flips_exactly_one_bit_per_hit() {
-        let mut rng = Xorshift32::new(0xDEAD_BEEF);
-        let before = [0x5Au8; 256];
-        let mut buf = before;
-        let n = inject_noise(&mut rng, 3000, &mut buf); // 30 %
-        assert_eq!(buf.len(), before.len());
-        let mut changed = 0usize;
-        for i in 0..buf.len() {
-            let d = buf[i] ^ before[i];
-            if d != 0 {
-                assert_eq!(d.count_ones(), 1, "byte {i} differs by {d:#04x}");
-                changed += 1;
+    fn line_noise_low_probability_is_sparse_but_hits_something() {
+        // 1e-4 概率、4096 字节：期望约 0.4 次故障。用多个种子保证至少
+        // 有一个种子命中，同时任何一次都不会把整块数据打满。
+        let mut hits = 0;
+        for seed in 1..=64u32 {
+            let mut rng = Xorshift32::new(seed * 7919);
+            let mut broke = 0u16;
+            let mut buf = [0x00u8; 4096];
+            let report = inject_line_noise(&mut rng, 10_000, 8, 1, &mut broke, &mut buf);
+            assert!(
+                report.corrupted + report.parity_errors + report.frame_errors < 4096,
+                "低概率下错误过多: {report:?}"
+            );
+            if report.has_errors() {
+                hits += 1;
             }
         }
-        assert_eq!(changed, n);
-        // Binomial(256, 0.3): mean 76.8, sigma ~7.3 -- 40..120 is >5 sigma.
-        assert!(n > 40 && n < 120, "corruption count out of band: {n}");
+        assert!(hits > 0, "64 个种子都没有命中 1e-4 概率");
     }
 
     #[test]
-    fn inject_noise_single_byte_boundaries() {
-        // prob = 1 (0.01 %) on one byte: may or may not hit, but if it hits
-        // exactly one bit must flip and the length must not change.
-        for seed in 0..64u32 {
-            let mut rng = Xorshift32::new(seed * 7919 + 1);
-            let mut one = [0x00u8];
-            let n = inject_noise(&mut rng, 1, &mut one);
-            assert!(n <= 1);
-            assert!(one[0] == 0x00 || one[0].count_ones() == 1);
-        }
-        // prob = 10000 on one byte always hits, and only one bit moves.
-        for seed in 0..64u32 {
-            let mut rng = Xorshift32::new(seed + 1);
-            let mut one = [0xFFu8];
-            assert_eq!(inject_noise(&mut rng, 10000, &mut one), 1);
-            assert_ne!(one[0], 0xFF);
-            assert_eq!(one[0].count_ones(), 7);
-        }
+    fn line_noise_never_leaves_high_bits_set_after_mask() {
+        // 上游顺序：先注入噪声，再套掩码。这里验证掩码确实能把噪声
+        // 重新置高的位清掉，7 位字长下结果必须全部 <= 0x7F。
+        let mut rng = Xorshift32::new(0xDEAD_BEEF);
+        let mut broke = 0u16;
+        let mut buf = [0xFFu8; 1024];
+        let _ = inject_line_noise(
+            &mut rng,
+            NOISE_PROBABILITY_ONE / 2,
+            7,
+            1,
+            &mut broke,
+            &mut buf,
+        );
+        apply_data_mask(&mut buf, data_mask(false, 7, 8));
+        assert!(buf.iter().all(|byte| *byte <= 0x7F));
     }
 
     #[test]
-    fn inject_noise_seed_reproducibility_and_divergence() {
-        let mut a = [0x11u8; 512];
-        let mut b = [0x11u8; 512];
-        let mut c = [0x11u8; 512];
-        let mut r1 = Xorshift32::new(1);
-        let mut r2 = Xorshift32::new(2);
-        let mut r3 = Xorshift32::new(1);
-        let n1 = inject_noise(&mut r1, 5000, &mut a);
-        let n2 = inject_noise(&mut r2, 5000, &mut b);
-        let n3 = inject_noise(&mut r3, 5000, &mut c);
-        // Same seed -> byte-identical corruption and identical count.
-        assert_eq!(n1, n3);
-        assert_eq!(a, c);
-        // Different seed -> different pattern.
-        assert_ne!(a, b);
-        assert!(n1 > 0 && n2 > 0);
+    fn line_noise_probability_boundaries_are_inclusive() {
+        // probability == ONE 时每个字符都命中（排除坏字符运行后仍有故障）。
+        let mut rng = Xorshift32::new(3);
+        let mut broke = 0u16;
+        let mut one = [0x00u8];
+        let report = inject_line_noise(&mut rng, NOISE_PROBABILITY_ONE, 8, 0, &mut broke, &mut one);
+        assert!(report.has_errors());
+        // probability == 0 且无坏字符运行时不消耗 RNG。
+        let mut rng = Xorshift32::new(3);
+        let before = rng.0;
+        let mut broke = 0u16;
+        let mut buf = [0x00u8; 16];
+        let report = inject_line_noise(&mut rng, 0, 8, 0, &mut broke, &mut buf);
+        assert!(!report.has_errors());
+        assert_eq!(rng.0, before);
     }
 
     #[test]

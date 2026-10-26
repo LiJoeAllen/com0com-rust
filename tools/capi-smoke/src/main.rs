@@ -181,7 +181,8 @@ fn run_fake(smoke: &mut Smoke) -> Result<(), String> {
 
     got.baud_emu = 1;
     got.noise_enabled = 1;
-    got.noise_probability = 250;
+    got.noise_probability = 2_500_000;
+    got.all_data_bits = 1;
     let code = unsafe { c0c_set_params(session, 0, &got) };
     let mut updated = c0c_params::default();
     let read_back = unsafe { c0c_get_params(session, 0, &mut updated) };
@@ -189,12 +190,13 @@ fn run_fake(smoke: &mut Smoke) -> Result<(), String> {
         code == C0C_OK
             && read_back == C0C_OK
             && updated.baud_emu == 1
-            && updated.noise_probability == 250,
+            && updated.noise_probability == 2_500_000
+            && updated.all_data_bits == 1,
         "set params",
     );
 
     let mut invalid = got;
-    invalid.noise_probability = 10_001;
+    invalid.noise_probability = 100_000_001;
     let code = unsafe { c0c_set_params(session, 0, &invalid) };
     smoke.check(
         code == C0C_E_INVALID_ARGUMENT,
@@ -304,7 +306,7 @@ fn run_fake(smoke: &mut Smoke) -> Result<(), String> {
         unsafe { c0c_state_export_json(session, json.as_mut_ptr(), json.len(), &mut required) };
     let json = read(&json);
     smoke.check(
-        code == C0C_OK && json.contains("\"schema\": 1") && json.contains("COM11"),
+        code == C0C_OK && json.contains("\"schema\": 2") && json.contains("COM11"),
         "state export json",
     );
 

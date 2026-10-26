@@ -9,6 +9,7 @@ description = "Unix user-mode PTY backend for the com0com SDK (pure Rust, no ker
 com0com-core = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
+com0com-common = { workspace = true }
 libc = { workspace = true }
 
 [lints]

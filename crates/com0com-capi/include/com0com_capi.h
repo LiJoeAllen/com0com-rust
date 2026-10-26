@@ -55,8 +55,8 @@
 #define C0C_SHA256_MAX 65u
 #define C0C_TIMESTAMP_MAX 40u
 
-#define C0C_SIZEOF_C0C_PARAMS 96u
-#define C0C_SIZEOF_C0C_PAIR_INFO 100u
+#define C0C_SIZEOF_C0C_PARAMS 100u
+#define C0C_SIZEOF_C0C_PAIR_INFO 104u
 #define C0C_SIZEOF_C0C_PORT_INFO 268u
 #define C0C_SIZEOF_C0C_DRIVER_DESC 428u
 #define C0C_SIZEOF_C0C_LOG_ENTRY 300u
@@ -89,11 +89,12 @@ typedef struct c0c_params {
     uint32_t baud_emu;
     uint32_t overrun;
     uint32_t noise_enabled;
-    uint32_t noise_probability; /* 0.01% units, 0..=10000 */
+    uint32_t noise_probability; /* denominator 100000000, 0..=100000000 */
     uint32_t exclusive;
     uint32_t plugin;
     uint8_t pin_wiring_a[4];
     uint8_t pin_wiring_b[4];
+    uint32_t all_data_bits;
 } c0c_params;
 C0C_STATIC_ASSERT(sizeof(c0c_params) == C0C_SIZEOF_C0C_PARAMS, "c0c_params layout");
 
@@ -109,6 +110,7 @@ typedef struct c0c_pair_info {
     uint32_t plugin;
     uint8_t pin_wiring_a[4];
     uint8_t pin_wiring_b[4];
+    uint32_t all_data_bits;
 } c0c_pair_info;
 C0C_STATIC_ASSERT(sizeof(c0c_pair_info) == C0C_SIZEOF_C0C_PAIR_INFO, "c0c_pair_info layout");
 

@@ -281,7 +281,7 @@ mod tests {
             Err(SdkError::Protocol(_))
         ));
         let mut snapshot = api.snapshot().unwrap();
-        snapshot.schema = 2;
+        snapshot.schema = 3;
         let json = serde_json::to_string(&snapshot).unwrap();
         assert!(matches!(
             api.import_json(&json, RestoreOptions::default()),

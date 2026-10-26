@@ -104,8 +104,15 @@ pub struct PinWiring {
 
 impl PinWiring {
     pub const NONE: Self = Self { lines: [0; 4] };
+    /// 与上游 com0com 默认值一致的空 Modem 接线：
+    ///
+    /// * CTS 跟随对端 RTS
+    /// * DSR 和 DCD 都跟随对端 DTR
+    /// * OUT1 / OUT2 不驱动任何输入线，因此 RI 恒为低（上游 `!on`）
+    ///
+    /// 旧实现把 OUT1/OUT2 接到 DCD/RI，与上游行为不一致。
     pub const NULL_MODEM: Self = Self {
-        lines: [PIN_TO_CTS, PIN_TO_DSR, PIN_TO_DCD, PIN_TO_RI],
+        lines: [PIN_TO_CTS, PIN_TO_DSR | PIN_TO_DCD, 0, 0],
     };
 }
 
@@ -123,8 +130,12 @@ pub struct PairParams {
     pub baud_emu: bool,
     pub overrun: bool,
     pub noise_enabled: bool,
-    /// 0.01% units: `0..=10000`.
-    pub noise_probability: u16,
+    /// 概率以 1/100_000_000 为单位，范围 `0..=100_000_000`（上游语义）。
+    pub noise_probability: u32,
+    /// 为 true 时保留全部 8 个数据位，不按两端字长截断（上游 `AllDataBits`）。
+    /// schema 1 快照没有该字段，按 false 处理。
+    #[serde(default)]
+    pub all_data_bits: bool,
     pub exclusive: bool,
     pub plugin: bool,
     pub pin_wiring_a: PinWiring,
@@ -140,6 +151,7 @@ impl Default for PairParams {
             overrun: false,
             noise_enabled: false,
             noise_probability: 0,
+            all_data_bits: false,
             exclusive: false,
             plugin: false,
             pin_wiring_a: PinWiring::NULL_MODEM,
@@ -150,9 +162,9 @@ impl Default for PairParams {
 
 impl PairParams {
     pub fn validate(&self) -> Result<(), SdkError> {
-        if self.noise_probability > 10_000 {
+        if self.noise_probability > 100_000_000 {
             return Err(SdkError::InvalidArgument(format!(
-                "noise_probability {} is outside 0..=10000",
+                "noise_probability {} is outside 0..=100000000",
                 self.noise_probability
             )));
         }
@@ -276,23 +288,25 @@ mod tests {
     }
 
     #[test]
-    fn pin_wiring_default_is_null_modem() {
+    fn pin_wiring_default_matches_upstream() {
         assert_eq!(PinWiring::default(), PinWiring::NULL_MODEM);
+        // 上游默认：CTS=RRTS、DSR=RDTR、DCD=RDTR、RI=!on（恒低）。
         assert_eq!(
             PinWiring::NULL_MODEM.lines,
-            [PIN_TO_CTS, PIN_TO_DSR, PIN_TO_DCD, PIN_TO_RI]
+            [PIN_TO_CTS, PIN_TO_DSR | PIN_TO_DCD, 0, 0]
         );
         assert_eq!(PairParams::default().pin_wiring_a, PinWiring::NULL_MODEM);
+        assert_eq!(PairParams::default().pin_wiring_b, PinWiring::NULL_MODEM);
     }
 
     #[test]
-    fn noise_probability_range() {
+    fn noise_probability_range_is_upstream_scale() {
         let mut params = PairParams {
-            noise_probability: 10_000,
+            noise_probability: 100_000_000,
             ..PairParams::default()
         };
         assert!(params.validate().is_ok());
-        params.noise_probability = 10_001;
+        params.noise_probability = 100_000_001;
         assert!(matches!(
             params.validate(),
             Err(SdkError::InvalidArgument(_))

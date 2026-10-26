@@ -407,7 +407,7 @@ mod tests {
             Err(SdkError::AlreadyExists)
         ));
         let bad = PairParams {
-            noise_probability: 10_001,
+            noise_probability: 100_000_001,
             ..PairParams::default()
         };
         assert!(matches!(

@@ -6,7 +6,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::{KernelKind, PairId, PairParams, SdkError, MAX_PAIR_ID};
 
-pub const SNAPSHOT_SCHEMA: u32 = 1;
+/// 快照格式版本。
+///
+/// 2：噪声概率从 0.01% 单位改为上游的 1/100_000_000 单位，并新增
+/// `all_data_bits`。加载 schema 1 文件时会自动换算（见 `state_io::load`）。
+pub const SNAPSHOT_SCHEMA: u32 = 2;
 
 /// Portable description of all pairs. PTY paths and handles are deliberately
 /// not stored: they are recreated on restore.

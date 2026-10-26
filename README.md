@@ -302,7 +302,8 @@ Linux / macOS 不需要安装驱动：构建后由 `com0comd`（或进程内 PTY
 ```
 setupc list
 setupc add   [--id N] [--port-a NAME] [--port-b NAME]
-             [--baud-emu] [--overrun] [--noise[=PROB]] [--exclusive] [--plugin]
+             [--baud-emu] [--overrun] [--noise[=PROB]] [--all-data-bits]
+             [--exclusive] [--plugin]
 setupc remove <id>
 setupc params <id>
 setupc set   <id> [same flags as add, minus --id/--port-*]
@@ -310,7 +311,8 @@ setupc set   <id> [same flags as add, minus --id/--port-*]
 
 - 省略 `--port-a/--port-b` 时：Windows 由系统 COM 名称仲裁分配 `COMx`；
   Unix 默认使用 `A{id}` / `B{id}` 作为链路标签。
-- `--noise=PROB` 中的 `PROB` 为 0..10000（单位 0.01%，即 `PROB/100` 为百分比）。
+- `--noise=PROB` 支持 `30%`、`0.05`（0.05%）、`30000000`（原始 1e8 分母）三种写法，
+  范围 0..=100%；只写 `--noise` 等价于 1%。
 - 省略 `--id` 时自动选择最小可用 id（上限 64 对）。
 - Windows 需要**管理员权限**运行（打开总线设备接口需要写访问）。
 - 排查问题时设置环境变量 `COM0COM_TRACE=1`，`setupc` 会把设备路径与每次 IOCTL 调用
@@ -384,10 +386,16 @@ cargo build -p com0com-capi --release
 - `emu_br`（波特率时序仿真）：按 `baud` + 帧格式（半比特精确计数，支持 1.5 停止位）给写路径发放字节预算；
   **实现方式**：写侧短写限速（`Information` = 本次实际投递字节数），**无 staging 缓冲、无定时器/DPC**；
   读侧不限速。已知边界：调用方需重试短写；高频小写入靠 Q16 定点 carry 累积，不会饿死。
-- `emu_noise`（噪声注入）：按 `noise_probability`（0..10000，单位 0.01%）逐字节翻转一个随机位，
-  使用确定性 `Xorshift32`（种子存在 `PortState.rng_state`，可复现）；**实现方式**：256 字节栈上分块
-  （不在内核栈开 16KB），破坏计数落到 `noise_count` / `FrameErrorCount` / `ParityErrorCount`。
-  已知边界：同一“写”只把帧/奇偶错误计数各 +1，不是逐字节计数。
+- `emu_noise`（噪声注入）：对标上游 `sys/noise.c` 的线路噪声模型，`noise_probability`
+  以 1/100_000_000 为单位。每个字节按发送端字长/校验位随机命中起始位、停止位、数据位或
+  校验位：起始位错误会替换为垃圾字符并连续发送最多 511 个坏字符（`broke_chars`），
+  停止位错误计帧错误，数据位错误翻转对应位并可能导致奇偶错误。使用确定性 `Xorshift32`
+  （种子存在 `PortState.rng_state`，可复现）；256 字节栈上分块处理，不在内核栈开大缓冲。
+  `noise_count` / `FrameErrorCount` / `ParityErrorCount` 按实际故障次数累计。
+- `all_data_bits`：关闭按两端字长截断数据位；默认仍像上游一样在噪声之后应用
+  `(1 << min(8, 本端字长, 对端字长)) - 1` 掩码（见 `data_mask`）。
+- 与上游 com0com 的逐项行为对齐、差异和兼容性说明见
+  [`docs/upstream-parity.md`](docs/upstream-parity.md)。
 - `emu_overrun`（溢出仿真）：写侧被对端队列上限截断时，把差额计入对端
   `SerialOverrunErrorCount` / `BufferOverrunErrorCount` 并置 `SERIAL_EV_ERR`；
   未开启该标志时的截断只是正常流控，不计错误。
@@ -437,7 +445,7 @@ cargo build -p com0com-capi --release
   复现见 [`tools/vm-test/`](tools/vm-test/README.md)。
 - 验证环境为 VMware + Win11 24H2 评估版；KMDF 1.33 要求 **Win11 24H2 / Server 2025 或更高**。
 - 配置持久化：Windows 驱动本身仍不持久化；SDK / `com0comd` 通过状态文件
-  （schema 1，原子写入，`--restore`/`--autosave`）恢复串口对，未运行守护进程时
+  （schema 2，原子写入，`--restore`/`--autosave`）恢复串口对，未运行守护进程时
   重启后需重新 `setupc add`。
 - 内核 crate `Cargo.toml` 内含 `[profile.dev]/[profile.release] panic = "abort"`
   （内核不支持 unwind）。二者现已是独立工作区根，该 profile **会正常生效**，

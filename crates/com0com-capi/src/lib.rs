@@ -117,12 +117,14 @@ pub struct c0c_params {
     pub baud_emu: u32,
     pub overrun: u32,
     pub noise_enabled: u32,
-    /// 0.01% units, `0..=10000`.
+    /// 概率分母 100_000_000（上游 com0com 语义），`0..=100_000_000`。
     pub noise_probability: u32,
     pub exclusive: u32,
     pub plugin: u32,
     pub pin_wiring_a: [u8; 4],
     pub pin_wiring_b: [u8; 4],
+    /// 0/1：保留全部 8 个数据位（上游 `AllDataBits`）。
+    pub all_data_bits: u32,
 }
 
 impl Default for c0c_params {
@@ -138,6 +140,7 @@ impl Default for c0c_params {
             plugin: 0,
             pin_wiring_a: [0; 4],
             pin_wiring_b: [0; 4],
+            all_data_bits: 0,
         }
     }
 }
@@ -156,6 +159,7 @@ pub struct c0c_pair_info {
     pub plugin: u32,
     pub pin_wiring_a: [u8; 4],
     pub pin_wiring_b: [u8; 4],
+    pub all_data_bits: u32,
 }
 
 impl Default for c0c_pair_info {
@@ -172,6 +176,7 @@ impl Default for c0c_pair_info {
             plugin: 0,
             pin_wiring_a: [0; 4],
             pin_wiring_b: [0; 4],
+            all_data_bits: 0,
         }
     }
 }
@@ -555,11 +560,12 @@ impl From<&PairParams> for c0c_params {
         out.baud_emu = value.baud_emu as u32;
         out.overrun = value.overrun as u32;
         out.noise_enabled = value.noise_enabled as u32;
-        out.noise_probability = value.noise_probability as u32;
+        out.noise_probability = value.noise_probability;
         out.exclusive = value.exclusive as u32;
         out.plugin = value.plugin as u32;
         out.pin_wiring_a = value.pin_wiring_a.lines;
         out.pin_wiring_b = value.pin_wiring_b.lines;
+        out.all_data_bits = value.all_data_bits as u32;
         out
     }
 }
@@ -574,12 +580,25 @@ fn pair_info(id: u8, params: &PairParams) -> c0c_pair_info {
     out.baud_emu = params.baud_emu as u32;
     out.overrun = params.overrun as u32;
     out.noise_enabled = params.noise_enabled as u32;
-    out.noise_probability = params.noise_probability as u32;
+    out.noise_probability = params.noise_probability;
     out.exclusive = params.exclusive as u32;
     out.plugin = params.plugin as u32;
     out.pin_wiring_a = params.pin_wiring_a.lines;
     out.pin_wiring_b = params.pin_wiring_b.lines;
+    out.all_data_bits = params.all_data_bits as u32;
     out
+}
+
+fn pin_wiring_from_c(lines: [u8; 4]) -> PinWiring {
+    // C 调用方的惯用写法是 `c0c_params p = {0}`（或 memset 清零），全零只表示
+    // "没填这一项"。端口驱动完全按接线字节算 MSR，若把全零当成"引脚全悬空"
+    // 传下去，CTS/DSR 会恒为低——所以未指定时落到上游默认的空 Modem 接线。
+    // 需要真正悬空请用 Rust 模型或 JSON 快照显式表达。
+    if lines == PinWiring::NONE.lines {
+        PinWiring::NULL_MODEM
+    } else {
+        PinWiring { lines }
+    }
 }
 
 fn params_from_c(value: &c0c_params) -> Result<PairParams, CError> {
@@ -589,16 +608,12 @@ fn params_from_c(value: &c0c_params) -> Result<PairParams, CError> {
         baud_emu: value.baud_emu != 0,
         overrun: value.overrun != 0,
         noise_enabled: value.noise_enabled != 0,
-        noise_probability: u16::try_from(value.noise_probability)
-            .map_err(|_| invalid("noise_probability is outside 0..=10000"))?,
+        noise_probability: value.noise_probability,
+        all_data_bits: value.all_data_bits != 0,
         exclusive: value.exclusive != 0,
         plugin: value.plugin != 0,
-        pin_wiring_a: PinWiring {
-            lines: value.pin_wiring_a,
-        },
-        pin_wiring_b: PinWiring {
-            lines: value.pin_wiring_b,
-        },
+        pin_wiring_a: pin_wiring_from_c(value.pin_wiring_a),
+        pin_wiring_b: pin_wiring_from_c(value.pin_wiring_b),
     };
     params.validate().map_err(|e| CError::from_sdk(&e))?;
     Ok(params)
@@ -1505,8 +1520,8 @@ mod tests {
 
     #[test]
     fn layout_is_stable() {
-        assert_eq!(C0C_SIZEOF_C0C_PARAMS, 96);
-        assert_eq!(C0C_SIZEOF_C0C_PAIR_INFO, 100);
+        assert_eq!(C0C_SIZEOF_C0C_PARAMS, 100);
+        assert_eq!(C0C_SIZEOF_C0C_PAIR_INFO, 104);
         assert_eq!(C0C_SIZEOF_C0C_PORT_INFO, 268);
         assert_eq!(C0C_SIZEOF_C0C_DRIVER_DESC, 428);
         assert_eq!(C0C_SIZEOF_C0C_LOG_ENTRY, 300);
@@ -1519,7 +1534,9 @@ mod tests {
         assert_eq!(std::mem::offset_of!(c0c_params, port_b), 32);
         assert_eq!(std::mem::offset_of!(c0c_params, baud_emu), 64);
         assert_eq!(std::mem::offset_of!(c0c_params, pin_wiring_a), 88);
+        assert_eq!(std::mem::offset_of!(c0c_params, all_data_bits), 96);
         assert_eq!(std::mem::offset_of!(c0c_pair_info, port_b), 36);
+        assert_eq!(std::mem::offset_of!(c0c_pair_info, all_data_bits), 100);
         assert_eq!(std::mem::offset_of!(c0c_driver_desc, sha256), 360);
     }
 
@@ -1530,21 +1547,35 @@ mod tests {
             port_b: PortName::new("COM12").unwrap(),
             baud_emu: true,
             noise_enabled: true,
-            noise_probability: 250,
-            pin_wiring_a: PinWiring::NONE,
+            noise_probability: 2_500_000,
+            all_data_bits: true,
+            pin_wiring_a: PinWiring {
+                lines: [0x20, 0x10, 0x40, 0x00],
+            },
             ..PairParams::default()
         };
         let pod = c0c_params::from(&params);
         assert_eq!(read_str(&pod.port_a).unwrap(), "COM11");
         assert_eq!(pod.baud_emu, 1);
-        assert_eq!(pod.noise_probability, 250);
+        assert_eq!(pod.noise_probability, 2_500_000);
+        assert_eq!(pod.all_data_bits, 1);
         assert_eq!(params_from_c(&pod).unwrap(), params);
+    }
+
+    #[test]
+    fn zeroed_pin_wiring_falls_back_to_null_modem() {
+        // C 侧 `c0c_params p = {0}` 不填接线，必须得到上游默认映射，
+        // 否则端口驱动算出的 MSR 全零，CTS/DSR 永不有效。
+        let pod = c0c_params::default();
+        let params = params_from_c(&pod).unwrap();
+        assert_eq!(params.pin_wiring_a, PinWiring::NULL_MODEM);
+        assert_eq!(params.pin_wiring_b, PinWiring::NULL_MODEM);
     }
 
     #[test]
     fn invalid_noise_is_rejected() {
         let pod = c0c_params {
-            noise_probability: 10_001,
+            noise_probability: 100_000_001,
             ..c0c_params::default()
         };
         assert_eq!(

@@ -2,9 +2,52 @@
 
 use com0com_core::{PairParams, PortName, MAX_PORT_NAME_CHARS};
 
+/// 噪声默认值：方便只写 `--noise` 时也真的产生噪声（1%）。
+const DEFAULT_NOISE_PROBABILITY: u32 = 1_000_000;
+
+/// 解析噪声概率。支持三种写法：
+/// * 百分比：`5%`；
+/// * 小数/科学计数法：`0.05`、`1e-4`；
+/// * 上游原始单位（1/100_000_000）：纯整数，如 `3000000`。
+///
+/// 旧版的 `--noise=3000` 表示 30%，现在会被当作 0.003%；迁移时应改写成
+/// `--noise=30%`。
+fn parse_noise_probability(text: &str) -> Result<u32, String> {
+    if let Some(percent) = text.strip_suffix('%') {
+        let value = percent
+            .trim()
+            .parse::<f64>()
+            .map_err(|_| "invalid --noise percentage")?;
+        return fraction_to_probability(value / 100.0);
+    }
+    if text.contains('.') || text.contains('e') || text.contains('E') {
+        let value = text
+            .trim()
+            .parse::<f64>()
+            .map_err(|_| "invalid --noise fraction")?;
+        return fraction_to_probability(value);
+    }
+    let raw = text
+        .trim()
+        .parse::<u64>()
+        .map_err(|_| "invalid --noise=prob value")?;
+    if raw > 100_000_000 {
+        return Err("invalid --noise=prob value (0..=100000000)".into());
+    }
+    Ok(raw as u32)
+}
+
+/// 把 `0.0..=1.0` 的概率换算成上游 1/1e8 单位。
+fn fraction_to_probability(fraction: f64) -> Result<u32, String> {
+    if !fraction.is_finite() || fraction < 0.0 || fraction > 1.0 {
+        return Err("noise probability must be within 0..=1 (or 0%..100%)".into());
+    }
+    Ok((fraction * 100_000_000.0).round() as u32)
+}
+
 /// Parse the shared `--id / --port-a / --port-b / --baud-emu / --overrun /
-/// --noise[=prob] / --exclusive / --plugin` arguments. `--id` is only relevant
-/// for `add`; for `set` it is ignored.
+/// --noise[=prob] / --all-data-bits / --exclusive / --plugin` arguments.
+/// `--id` is only relevant for `add`; for `set` it is ignored.
 pub struct PairArgs {
     pub id: Option<u32>,
     pub params: PairParams,
@@ -44,20 +87,19 @@ pub fn parse_pair_args(args: &[String]) -> Result<PairArgs, String> {
             }
             "--baud-emu" => pa.params.baud_emu = true,
             "--overrun" => pa.params.overrun = true,
-            "--noise" => pa.params.noise_enabled = true,
+            "--noise" => {
+                pa.params.noise_enabled = true;
+                if pa.params.noise_probability == 0 {
+                    pa.params.noise_probability = DEFAULT_NOISE_PROBABILITY;
+                }
+            }
+            "--all-data-bits" => pa.params.all_data_bits = true,
             "--exclusive" => pa.params.exclusive = true,
             "--plugin" => pa.params.plugin = true,
             other => {
-                // `--noise=3000` style.
                 if let Some(prob) = other.strip_prefix("--noise=") {
-                    let prob = prob
-                        .parse::<u16>()
-                        .map_err(|_| "invalid --noise=prob value")?;
-                    if prob > 10_000 {
-                        return Err("invalid --noise=prob value (0..=10000)".into());
-                    }
                     pa.params.noise_enabled = true;
-                    pa.params.noise_probability = prob;
+                    pa.params.noise_probability = parse_noise_probability(prob)?;
                 } else {
                     return Err(format!("unknown argument: {other}"));
                 }
@@ -88,7 +130,8 @@ mod tests {
             "COM16",
             "--baud-emu",
             "--overrun",
-            "--noise=3000",
+            "--noise=30%",
+            "--all-data-bits",
             "--exclusive",
             "--plugin",
         ]);
@@ -99,7 +142,8 @@ mod tests {
         assert!(pa.params.baud_emu);
         assert!(pa.params.overrun);
         assert!(pa.params.noise_enabled);
-        assert_eq!(pa.params.noise_probability, 3000);
+        assert_eq!(pa.params.noise_probability, 30_000_000);
+        assert!(pa.params.all_data_bits);
         assert!(pa.params.exclusive);
         assert!(pa.params.plugin);
         // The parser seeds the default null-modem pin wiring.
@@ -108,10 +152,27 @@ mod tests {
     }
 
     #[test]
-    fn parse_bare_noise_sets_flag_without_probability() {
+    fn parse_bare_noise_uses_one_percent_default() {
         let pa = parse_pair_args(&args(&["--noise"])).expect("should parse");
         assert!(pa.params.noise_enabled);
-        assert_eq!(pa.params.noise_probability, 0);
+        assert_eq!(pa.params.noise_probability, 1_000_000);
+    }
+
+    #[test]
+    fn parse_noise_accepts_percent_fraction_and_raw_units() {
+        let cases = [
+            ("--noise=5%", 5_000_000u32),
+            ("--noise=0.05", 5_000_000),
+            ("--noise=1e-4", 10_000),
+            ("--noise=3000", 3000),
+            ("--noise=100%", 100_000_000),
+            ("--noise=0", 0),
+        ];
+        for (flag, expected) in cases {
+            let pa = parse_pair_args(&args(&[flag])).expect(flag);
+            assert!(pa.params.noise_enabled, "{flag}");
+            assert_eq!(pa.params.noise_probability, expected, "{flag}");
+        }
     }
 
     #[test]
@@ -144,8 +205,9 @@ mod tests {
         assert!(parse_pair_args(&args(&["--id", "notanumber"])).is_err());
         assert!(parse_pair_args(&args(&["--port-a"])).is_err());
         assert!(parse_pair_args(&args(&["--noise=abc"])).is_err());
-        assert!(parse_pair_args(&args(&["--noise=10001"])).is_err());
-        assert!(parse_pair_args(&args(&["--noise=70000"])).is_err());
+        assert!(parse_pair_args(&args(&["--noise=100000001"])).is_err());
+        assert!(parse_pair_args(&args(&["--noise=1.5"])).is_err());
+        assert!(parse_pair_args(&args(&["--noise=101%"])).is_err());
     }
 
     #[test]

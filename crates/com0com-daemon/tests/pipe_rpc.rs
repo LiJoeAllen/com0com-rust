@@ -134,7 +134,7 @@ fn crud_events_errors_reconnect_and_shutdown() {
     ));
     assert!(matches!(remote.delete_pair(9), Err(SdkError::NotFound)));
     let invalid = PairParams {
-        noise_probability: 10_001,
+        noise_probability: 100_000_001,
         ..PairParams::default()
     };
     assert!(matches!(

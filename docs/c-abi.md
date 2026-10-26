@@ -108,14 +108,22 @@ c0c_params params;
 c0c_get_params(session, 5, &params);
 params.baud_emu = 1;
 params.noise_enabled = 1;
-params.noise_probability = 250;          /* 2.5% */
+params.noise_probability = 2500000;      /* 2.5%（分母 1e8） */
+params.all_data_bits = 1;                /* 保留 8 位，不按字长截断 */
 c0c_set_params(session, 5, &params);
 
 c0c_port_info ports[64];
 c0c_list_ports(session, ports, 64, &count);
 ```
 
-`noise_probability` 超出 `0..=10000` 返回 `C0C_E_INVALID_ARGUMENT`。
+`noise_probability` 超出 `0..=100000000` 返回 `C0C_E_INVALID_ARGUMENT`。
+`c0c_params` / `c0c_pair_info` 末尾新增 `all_data_bits`，对应大小常量
+（`C0C_SIZEOF_C0C_PARAMS` / `C0C_SIZEOF_C0C_PAIR_INFO`）已同步更新。
+
+`pin_wiring_a` / `pin_wiring_b` 的四个字节依次是本端口 RTS/DTR/OUT1/OUT2
+驱动到对端的输入线位（CTS=0x10、DSR=0x20、RI=0x40、DCD=0x80）。**全零视为
+"未指定"**，SDK 按上游默认空 Modem 接线填充（CTS←RTS、DSR 与 DCD←DTR、
+OUT1/OUT2 悬空）；`c0c_params p = {0}` 这种清零写法因此仍能正常握手。
 
 ## 事件
 

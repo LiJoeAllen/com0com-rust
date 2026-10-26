@@ -50,7 +50,48 @@ pub fn save_to(path: &Path, snapshot: &Snapshot) -> Result<(), SdkError> {
 /// Read and validate a state file.
 pub fn load(path: &Path) -> Result<Snapshot, SdkError> {
     let bytes = fs::read(path).map_err(io_error)?;
-    let snapshot: Snapshot = serde_json::from_slice(&bytes).map_err(protocol_error)?;
+    decode_snapshot(&bytes)
+}
+
+/// 反序列化快照，并把 schema 1 的旧噪声概率换算成上游单位。
+///
+/// schema 1 用 0.01% 单位（0..=10000），schema 2 用 1/1e8 单位。
+/// 旧文件里的 `noise_probability` 需要乘以 10_000，并补上默认的
+/// `all_data_bits = false`（由字段上的 `#[serde(default)]` 完成）。
+fn decode_snapshot(json: &[u8]) -> Result<Snapshot, SdkError> {
+    let mut value: serde_json::Value = serde_json::from_slice(json).map_err(protocol_error)?;
+    let schema = value
+        .get("schema")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    if schema == 1 {
+        if let Some(pairs) = value
+            .get_mut("pairs")
+            .and_then(serde_json::Value::as_array_mut)
+        {
+            for pair in pairs {
+                let Some(params) = pair
+                    .get_mut("params")
+                    .and_then(serde_json::Value::as_object_mut)
+                else {
+                    continue;
+                };
+                let Some(prob) = params
+                    .get("noise_probability")
+                    .and_then(serde_json::Value::as_u64)
+                else {
+                    continue;
+                };
+                let scaled = prob.saturating_mul(10_000).min(100_000_000);
+                params.insert(
+                    "noise_probability".to_string(),
+                    serde_json::Value::from(scaled),
+                );
+            }
+        }
+        value["schema"] = serde_json::Value::from(crate::SNAPSHOT_SCHEMA);
+    }
+    let snapshot: Snapshot = serde_json::from_value(value).map_err(protocol_error)?;
     snapshot.validate()?;
     Ok(snapshot)
 }
@@ -68,7 +109,7 @@ pub fn import_json(
     json: &str,
     options: RestoreOptions,
 ) -> Result<RestoreReport, SdkError> {
-    let snapshot: Snapshot = serde_json::from_str(json).map_err(protocol_error)?;
+    let snapshot = decode_snapshot(json.as_bytes())?;
     restore(backend, &snapshot, options)
 }
 
@@ -373,8 +414,46 @@ mod tests {
         assert!(matches!(load(&path), Err(SdkError::Protocol(_))));
 
         let mut wrong = snapshot();
-        wrong.schema = 2;
+        wrong.schema = 3;
         fs::write(&path, serde_json::to_vec(&wrong).unwrap()).unwrap();
         assert!(matches!(load(&path), Err(SdkError::Protocol(_))));
+    }
+
+    #[test]
+    fn schema_one_snapshot_is_migrated_to_upstream_noise_scale() {
+        let dir = TestDir::new();
+        let path = dir.join("v1.json");
+        // schema 1：噪声用 0.01% 单位，没有 all_data_bits 字段。
+        let json = serde_json::json!({
+            "schema": 1,
+            "created_at": {"secs_since_epoch": 0, "nanos_since_epoch": 0},
+            "platform": "fake",
+            "kernel": "none",
+            "pairs": [{
+                "id": 2,
+                "params": {
+                    "port_a": "A2",
+                    "port_b": "B2",
+                    "baud_emu": false,
+                    "overrun": false,
+                    "noise_enabled": true,
+                    "noise_probability": 3000,
+                    "exclusive": false,
+                    "plugin": false,
+                    "pin_wiring_a": {"lines": [16, 32, 0, 0]},
+                    "pin_wiring_b": {"lines": [16, 32, 0, 0]}
+                }
+            }]
+        });
+        fs::write(&path, serde_json::to_vec(&json).unwrap()).unwrap();
+        let loaded = load(&path).unwrap();
+        assert_eq!(loaded.schema, crate::SNAPSHOT_SCHEMA);
+        assert_eq!(loaded.pairs[0].params.noise_probability, 30_000_000);
+        assert!(!loaded.pairs[0].params.all_data_bits);
+        // 上限同样被迁移逻辑钳住。
+        assert_eq!(
+            30_000_000u64.saturating_mul(10_000).min(100_000_000),
+            100_000_000
+        );
     }
 }

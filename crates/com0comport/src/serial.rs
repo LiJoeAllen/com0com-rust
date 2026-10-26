@@ -14,7 +14,7 @@ use wdk_sys::{
 
 use com0com_common::{
     constants::{
-        SERIAL_CTS_STATE, SERIAL_DSR_STATE, SERIAL_DTR_STATE, SERIAL_EV_RXCHAR, SERIAL_EV_RXFLAG,
+        SERIAL_DTR_STATE, SERIAL_EV_RXCHAR, SERIAL_EV_RXFLAG, SERIAL_OUT1_STATE, SERIAL_OUT2_STATE,
         SERIAL_RTS_STATE,
     },
     emulation::{clamp_queue_size, XoffState},
@@ -38,6 +38,10 @@ const PURGE_RXABORT: u32 = 0x0002;
 const PURGE_TXCLEAR: u32 = 0x0004;
 const PURGE_RXCLEAR: u32 = 0x0008;
 const PURGE_MASK_ALL: u32 = PURGE_TXABORT | PURGE_RXABORT | PURGE_TXCLEAR | PURGE_RXCLEAR;
+
+/// 调制解调器控制寄存器（MCR）中可由软件驱动的全部输出线。
+const MCR_OUTPUT_MASK: u32 =
+    (SERIAL_DTR_STATE | SERIAL_RTS_STATE | SERIAL_OUT1_STATE | SERIAL_OUT2_STATE) as u32;
 
 #[inline]
 unsafe fn lock(pc: *mut PairContext) -> KIRQL {
@@ -78,6 +82,27 @@ fn complete(irp: PIRP, status: NTSTATUS, info: usize) -> NTSTATUS {
         IoCompleteRequest(irp, IO_NO_INCREMENT as i8);
     }
     status
+}
+
+/// 按 `mask` 更新本端输出线，并把由此引起的对端输入变化通知对端。
+///
+/// 与上游 `SetModemControl()` 一样，一次调用可同时置位和清零多根线
+/// （`IOCTL_SERIAL_SET_MODEM_CONTROL` 就是整字覆盖）；对端 `WAIT_ON_MASK`
+/// 挂起时按 CTS/DSR/RLSD/RING 事件唤醒它。IRP 必须在释放自旋锁后再完成。
+///
+/// # Safety
+/// `pc` 必须是存活的 `PairContext`。
+unsafe fn set_modem_lines(pc: *mut PairContext, idx: usize, bits: u32, mask: u32) {
+    let peer = 1 - idx;
+    let irql = lock(pc);
+    let before = readwrite::modem_inputs_locked(pc, peer);
+    let current = (*pc).port[idx].modem_control;
+    (*pc).port[idx].modem_control = (current & !mask) | (bits & mask);
+    let after = readwrite::modem_inputs_locked(pc, peer);
+    let events = readwrite::modem_events(before ^ after);
+    let wake = readwrite::wake_event_locked(pc, peer, events);
+    unlock(pc, irql);
+    readwrite::finish_peer_wake(&wake);
 }
 
 /// Dispatch the serial `IOCTL_SERIAL_*` surface.
@@ -235,17 +260,10 @@ pub unsafe fn dispatch_serial(ext: *mut PortExtension, irp: PIRP) -> NTSTATUS {
             }
         }
         ioctls::IOCTL_SERIAL_GET_MODEMSTATUS => {
+            // 只返回 MSR 输入线（CTS/DSR/RI/DCD），由对端输出经 pin wiring
+            // 映射而来；本端 DTR/RTS 等输出线请用 GET_MODEM_CONTROL。
             let irql = lock(pc);
-            let peer = 1 - idx;
-            let peer_mcr = (*pc).port[peer].modem_control;
-            let mut status: u32 =
-                (*pc).port[idx].modem_control & (SERIAL_DTR_STATE | SERIAL_RTS_STATE) as u32;
-            if (peer_mcr & SERIAL_DTR_STATE as u32) != 0 {
-                status |= SERIAL_DSR_STATE as u32;
-            }
-            if (peer_mcr & SERIAL_RTS_STATE as u32) != 0 {
-                status |= SERIAL_CTS_STATE as u32;
-            }
+            let status = readwrite::modem_inputs_locked(pc, idx);
             unlock(pc, irql);
             let out: u32 = status;
             let n = write_out(irp, &out);
@@ -256,35 +274,18 @@ pub unsafe fn dispatch_serial(ext: *mut PortExtension, irp: PIRP) -> NTSTATUS {
         | ioctls::IOCTL_SERIAL_CLR_DTR
         | ioctls::IOCTL_SERIAL_SET_RTS
         | ioctls::IOCTL_SERIAL_CLR_RTS => {
-            let irql = lock(pc);
-            match ioctl {
-                ioctls::IOCTL_SERIAL_SET_DTR => {
-                    (*pc).port[idx].modem_control |= SERIAL_DTR_STATE as u32
-                }
-                ioctls::IOCTL_SERIAL_CLR_DTR => {
-                    (*pc).port[idx].modem_control &= !(SERIAL_DTR_STATE as u32)
-                }
-                ioctls::IOCTL_SERIAL_SET_RTS => {
-                    (*pc).port[idx].modem_control |= SERIAL_RTS_STATE as u32
-                }
-                ioctls::IOCTL_SERIAL_CLR_RTS => {
-                    (*pc).port[idx].modem_control &= !(SERIAL_RTS_STATE as u32)
-                }
-                ioctls::IOCTL_SERIAL_SET_MODEM_CONTROL => {
-                    // Takes a ULONG; set DTR/RTS bits accordingly.
-                    let req: Option<u32> = read_in(irp, 4);
-                    if let Some(m) = req {
-                        if (m & SERIAL_DTR_STATE as u32) != 0 {
-                            (*pc).port[idx].modem_control |= SERIAL_DTR_STATE as u32;
-                        }
-                        if (m & SERIAL_RTS_STATE as u32) != 0 {
-                            (*pc).port[idx].modem_control |= SERIAL_RTS_STATE as u32;
-                        }
-                    }
-                }
-                _ => {}
-            }
-            unlock(pc, irql);
+            // SET/CLR_* 只动一根线；SET_MODEM_CONTROL 按整字覆盖四根输出线。
+            let (bits, mask) = match ioctl {
+                ioctls::IOCTL_SERIAL_SET_MODEM_CONTROL => match read_in::<u32>(irp, 4) {
+                    Some(m) => (m & MCR_OUTPUT_MASK, MCR_OUTPUT_MASK),
+                    None => return complete(irp, wdk_sys::STATUS_INVALID_PARAMETER, 0),
+                },
+                ioctls::IOCTL_SERIAL_SET_DTR => (SERIAL_DTR_STATE as u32, SERIAL_DTR_STATE as u32),
+                ioctls::IOCTL_SERIAL_CLR_DTR => (0, SERIAL_DTR_STATE as u32),
+                ioctls::IOCTL_SERIAL_SET_RTS => (SERIAL_RTS_STATE as u32, SERIAL_RTS_STATE as u32),
+                _ => (0, SERIAL_RTS_STATE as u32),
+            };
+            set_modem_lines(pc, idx, bits, mask);
             complete(irp, wdk_sys::STATUS_SUCCESS, 0)
         }
         ioctls::IOCTL_SERIAL_GET_COMMSTATUS => {
@@ -511,10 +512,16 @@ pub unsafe fn dispatch_serial(ext: *mut PortExtension, irp: PIRP) -> NTSTATUS {
             unlock(pc, irql);
             complete(irp, wdk_sys::STATUS_SUCCESS, 0)
         }
-        ioctls::IOCTL_SERIAL_GET_DTRRTS => {
+        ioctls::IOCTL_SERIAL_GET_MODEM_CONTROL | ioctls::IOCTL_SERIAL_GET_DTRRTS => {
+            // GET_DTRRTS 是 GET_MODEM_CONTROL 的受限视图，只暴露 DTR/RTS。
             let irql = lock(pc);
-            let out = (*pc).port[idx].modem_control & (SERIAL_DTR_STATE | SERIAL_RTS_STATE) as u32;
+            let mcr = (*pc).port[idx].modem_control;
             unlock(pc, irql);
+            let out = if ioctl == ioctls::IOCTL_SERIAL_GET_DTRRTS {
+                mcr & (SERIAL_DTR_STATE | SERIAL_RTS_STATE) as u32
+            } else {
+                mcr & MCR_OUTPUT_MASK
+            };
             let o = out;
             let n = write_out(irp, &o);
             complete(irp, wdk_sys::STATUS_SUCCESS, n)

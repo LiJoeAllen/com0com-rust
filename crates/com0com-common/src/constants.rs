@@ -54,6 +54,8 @@ pub const SERIAL_EV_EVENT2: u32 = 0x1000;
 // ---------- Modem status bits returned by GET_MODEMSTATUS ----------
 pub const SERIAL_DTR_STATE: u8 = 0x01;
 pub const SERIAL_RTS_STATE: u8 = 0x02;
+pub const SERIAL_OUT1_STATE: u8 = 0x04;
+pub const SERIAL_OUT2_STATE: u8 = 0x08;
 pub const SERIAL_CTS_STATE: u8 = 0x10;
 pub const SERIAL_DSR_STATE: u8 = 0x20;
 pub const SERIAL_RI_STATE: u8 = 0x40;
@@ -128,23 +130,15 @@ pub const BUS_HW_ID: &str = "COM0COM\\BUS";
 pub const PORT_A_HW_ID: &str = "COM0COM\\PORT_A";
 pub const PORT_B_HW_ID: &str = "COM0COM\\PORT_B";
 
-// ---------- Default null-modem pin wiring (RTS->CTS, DTR->DSR, OUT1->DCD, OUT2->RI) ----------
+// ---------- Default null-modem pin wiring ----------
+// 与上游 com0com 默认值一致：RTS->CTS，DTR->DSR 且 DTR->DCD，
+// OUT1/OUT2 不接任何输入线，因此对端 RI 恒为低（上游 `!on`）。
 // Index 0 = port A, index 1 = port B. Each entry describes how THIS port's
 // output lines map to the PEER's input (modem-status) lines.
 pub const DEFAULT_PIN_WIRING: [[u8; 4]; 2] = [
-    // A's RTS/DTR/OUT1/OUT2 -> B sees as CTS/DSR/DCD/RI
-    [
-        SERIAL_CTS_STATE,
-        SERIAL_DSR_STATE,
-        SERIAL_DCD_STATE,
-        SERIAL_RI_STATE,
-    ],
-    [
-        SERIAL_CTS_STATE,
-        SERIAL_DSR_STATE,
-        SERIAL_DCD_STATE,
-        SERIAL_RI_STATE,
-    ],
+    // A's RTS/DTR/OUT1/OUT2 -> B sees as CTS, DSR|DCD, none, none
+    [SERIAL_CTS_STATE, SERIAL_DSR_STATE | SERIAL_DCD_STATE, 0, 0],
+    [SERIAL_CTS_STATE, SERIAL_DSR_STATE | SERIAL_DCD_STATE, 0, 0],
 ];
 
 #[cfg(test)]
@@ -171,12 +165,15 @@ mod tests {
     }
 
     #[test]
-    fn default_pin_wiring_maps_all_lines() {
+    fn default_pin_wiring_matches_upstream() {
         for wiring in &DEFAULT_PIN_WIRING {
+            // CTS 跟随 RTS。
             assert_eq!(wiring[0], SERIAL_CTS_STATE);
-            assert_eq!(wiring[1], SERIAL_DSR_STATE);
-            assert_eq!(wiring[2], SERIAL_DCD_STATE);
-            assert_eq!(wiring[3], SERIAL_RI_STATE);
+            // DSR 和 DCD 都跟随 DTR。
+            assert_eq!(wiring[1], SERIAL_DSR_STATE | SERIAL_DCD_STATE);
+            // OUT1/OUT2 悬空，RI 恒低。
+            assert_eq!(wiring[2], 0);
+            assert_eq!(wiring[3], 0);
         }
     }
 
@@ -234,6 +231,8 @@ mod tests {
         assert_eq!(SERIAL_DCD_STATE, 0x80);
         assert_eq!(SERIAL_DTR_STATE, 0x01);
         assert_eq!(SERIAL_RTS_STATE, 0x02);
+        assert_eq!(SERIAL_OUT1_STATE, 0x04);
+        assert_eq!(SERIAL_OUT2_STATE, 0x08);
         assert_eq!(CE_RXOVER, 0x0001);
         assert_eq!(CE_FRAME, 0x0008);
         assert_eq!(CE_TXFULL, 0x0100);

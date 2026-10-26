@@ -23,11 +23,11 @@ Unix 不实现 TTY 内核模块、DriverKit dext 或 kext，也不需要关闭 S
 |---|---|---|---|---|
 | `PAIR_MANAGEMENT` | 支持 | 支持 | — | 增删查对、自动/显式 id |
 | `PARAM_BAUD_EMU` | 支持 | 支持 | — | Unix 按目标端 `cfgetospeed` 做用户态节流 |
-| `PARAM_NOISE` | 支持 | 支持 | — | 逐字节翻转一位，`noise_probability` 0..=10000 |
+| `PARAM_NOISE` | 支持 | 支持 | — | 上游噪声模型；`noise_probability` 分母 1e8，PTY 端按 8N 建模（Linux pty 强制 CS8） |
 | `PARAM_OVERRUN` | 支持 | 支持 | — | Unix 仅丢字节；不产生 `TTY_OVERRUN` 统计 |
 | `PARAM_EXCLUSIVE` | 支持 | **false** | — | PTY 无法可靠拦截其他进程 open |
 | `PARAM_PLUGIN` | 支持 | **false** | — | 无插件模型 |
-| `PARAM_PIN_WIRING` | 支持 | **false** | — | PTY 没有真实 modem 线 |
+| `PARAM_PIN_WIRING` | 支持 | **false** | — | Windows 用 pin wiring 驱动 CTS/DSR/DCD/RI 与 `WAIT_ON_MASK`；PTY 没有真实 modem 线 |
 | `SERIAL_MONITOR` | 支持 | 支持 | — | Unix 通过受管理的稳定链接打开 |
 | `DRIVER_DIAGNOSTICS` | 支持 | **false** | — | Unix 无驱动；`driver_info` 只报 PTY 版本 |
 | `DRIVER_LOGS` | 支持 | **false** | — | Unix 用 `com0comd --log` 的 daemon 日志 |

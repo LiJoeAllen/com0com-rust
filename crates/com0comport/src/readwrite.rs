@@ -19,8 +19,15 @@ use wdk_sys::{
 };
 
 use com0com_common::{
-    constants::{SERIAL_EV_ERR, SERIAL_EV_RXCHAR},
-    emulation::{frame_half_bits, inject_noise, LinePacer, XoffState, Xorshift32},
+    constants::{
+        SERIAL_CTS_STATE, SERIAL_DCD_STATE, SERIAL_DSR_STATE, SERIAL_DTR_STATE, SERIAL_EV_CTS,
+        SERIAL_EV_DSR, SERIAL_EV_ERR, SERIAL_EV_RING, SERIAL_EV_RLSD, SERIAL_EV_RXCHAR,
+        SERIAL_OUT1_STATE, SERIAL_OUT2_STATE, SERIAL_RI_STATE, SERIAL_RTS_STATE,
+    },
+    emulation::{
+        apply_data_mask, data_mask, frame_half_bits, inject_line_noise, LinePacer, XoffState,
+        Xorshift32,
+    },
     pair::PairContext,
 };
 
@@ -91,7 +98,7 @@ pub struct PeerWake {
 }
 
 impl PeerWake {
-    const fn none() -> Self {
+    pub(crate) const fn none() -> Self {
         PeerWake {
             read_irp: ptr::null_mut(),
             read_len: 0,
@@ -99,6 +106,74 @@ impl PeerWake {
             event_mask: 0,
         }
     }
+}
+
+/// 记录端口 `port` 的事件并唤醒其 `WAIT_ON_MASK`（若掩码命中）。
+///
+/// 与 [`wake_peer_locked`] 相同的所有权协议：必须在 pair 锁内调用，返回的
+/// IRP 由调用方在解锁后交给 [`finish_peer_wake`] 完成。
+///
+/// # Safety
+/// `pc` 必须是存活的 `PairContext`，且调用方已持有其自旋锁。
+pub(crate) unsafe fn wake_event_locked(pc: *mut PairContext, port: usize, events: u32) -> PeerWake {
+    let mut wake = PeerWake::none();
+    if events == 0 {
+        return wake;
+    }
+    (*pc).port[port].pending_events |= events;
+    if (*pc).port[port].pending_event_irp != 0 && ((*pc).port[port].wait_mask & events) != 0 {
+        wake.event_irp = (*pc).port[port].pending_event_irp as *mut wdk_sys::IRP;
+        wake.event_mask = (*pc).port[port].wait_mask & (*pc).port[port].pending_events;
+        (*pc).port[port].pending_event_irp = 0;
+        (*pc).port[port].pending_events = 0;
+    }
+    wake
+}
+
+/// 计算端口 `idx` 的调制解调器输入状态（MSR 中的 CTS/DSR/RI/DCD）。
+///
+/// 与上游 `PinWire()` 一致：本端看到的输入只来自对端 RTS/DTR/OUT1/OUT2 经
+/// `pin_wiring[peer]` 的映射；DTR/RTS 等输出线不出现在 MSR 里，由
+/// `GET_MODEM_CONTROL` / `GET_DTRRTS` 单独返回。
+///
+/// # Safety
+/// `pc` 必须是存活的 `PairContext`，且调用方已持有其自旋锁。
+pub(crate) unsafe fn modem_inputs_locked(pc: *mut PairContext, idx: usize) -> u32 {
+    let peer = 1 - idx;
+    let peer_outs = (*pc).port[peer].modem_control;
+    let wiring = (*pc).params.pin_wiring[peer];
+    let mut status = 0u32;
+    // wiring 的四个字节依次对应本端 RTS/DTR/OUT1/OUT2 驱动到对端的输入线。
+    let sources = [
+        (SERIAL_RTS_STATE as u32, wiring[0]),
+        (SERIAL_DTR_STATE as u32, wiring[1]),
+        (SERIAL_OUT1_STATE as u32, wiring[2]),
+        (SERIAL_OUT2_STATE as u32, wiring[3]),
+    ];
+    for (out_bit, input_bits) in sources {
+        if (peer_outs & out_bit) != 0 {
+            status |= input_bits as u32;
+        }
+    }
+    status
+}
+
+/// 把 MSR 输入位变化翻译成 `WAIT_ON_MASK` 事件位。
+pub(crate) fn modem_events(changed: u32) -> u32 {
+    let mut events = 0u32;
+    if (changed & SERIAL_CTS_STATE as u32) != 0 {
+        events |= SERIAL_EV_CTS;
+    }
+    if (changed & SERIAL_DSR_STATE as u32) != 0 {
+        events |= SERIAL_EV_DSR;
+    }
+    if (changed & SERIAL_RI_STATE as u32) != 0 {
+        events |= SERIAL_EV_RING;
+    }
+    if (changed & SERIAL_DCD_STATE as u32) != 0 {
+        events |= SERIAL_EV_RLSD;
+    }
+    events
 }
 
 /// Collect whatever peer IRPs a delivery of `delivered` bytes can satisfy.
@@ -117,10 +192,8 @@ pub unsafe fn wake_peer_locked(pc: *mut PairContext, idx: usize, delivered: usiz
         // RXCHAR that did not happen.
         return PeerWake::none();
     }
-    let mut wake = PeerWake::none();
-
-    // Flag a RXCHAR event for the peer.
-    (*pc).port[peer].pending_events |= SERIAL_EV_RXCHAR;
+    // RXCHAR 事件：记录待处理事件，并满足等待该事件的 WAIT_ON_MASK。
+    let mut wake = wake_event_locked(pc, peer, SERIAL_EV_RXCHAR);
 
     // Satisfy a peer pended read if present.
     if (*pc).port[peer].pending_read_irp != 0 {
@@ -133,16 +206,6 @@ pub unsafe fn wake_peer_locked(pc: *mut PairContext, idx: usize, delivered: usiz
             .read(core::slice::from_raw_parts_mut(pbuf, pwant));
         (*pc).port[peer].pending_read_irp = 0;
         wake.read_irp = pirp;
-    }
-
-    // Satisfy a peer pended WAIT_ON_MASK if its mask wants RXCHAR.
-    if (*pc).port[peer].pending_event_irp != 0
-        && ((*pc).port[peer].wait_mask & SERIAL_EV_RXCHAR) != 0
-    {
-        wake.event_irp = (*pc).port[peer].pending_event_irp as *mut wdk_sys::IRP;
-        wake.event_mask = (*pc).port[peer].wait_mask & (*pc).port[peer].pending_events;
-        (*pc).port[peer].pending_event_irp = 0;
-        (*pc).port[peer].pending_events = 0;
     }
     wake
 }
@@ -351,47 +414,77 @@ pub unsafe fn handle_write(ext: *mut PortExtension, irp: PIRP) -> NTSTATUS {
 
     // --- 2) Deliver into the peer's RX ring, honouring its queue limit. ----
     let cap = (*pc).port[peer].queue_limit as usize;
+    // 只处理真正能进环形缓冲区的字节：噪声与掩码不应作用到被丢弃的数据上。
+    let room = (*pc).port[peer]
+        .rx
+        .available_to_write()
+        .min(cap.saturating_sub((*pc).port[peer].rx.available_to_read()));
+    let deliver_len = allowed.min(room);
+    // 写作端/读端字长共同决定 AllDataBits 掩码，顺序与上游一致：先噪声后掩码。
+    let writer_word_length = (*pc).port[idx].line_control[2];
+    let writer_parity = (*pc).port[idx].line_control[1];
+    let reader_word_length = (*pc).port[peer].line_control[2];
+    let mask = data_mask(
+        params.all_data_bits != 0,
+        reader_word_length,
+        writer_word_length,
+    );
+
     let written: usize;
-    if params.emu_noise != 0 {
-        // Noise path: stage in small chunks, corrupt in place, then queue. The
-        // default (no-noise) path below stays zero-copy.
+    if deliver_len == 0 {
+        written = 0;
+    } else if params.emu_noise != 0 || mask != 0xFF {
+        // 需要改写数据（噪声或截位），先在小块栈缓冲里处理再入队；
+        // 无噪声且 8 位掩码时下面的零拷贝路径不变。
         let mut rng = Xorshift32::new((*pc).port[idx].rng_state);
+        let mut broke_chars = (*pc).port[idx].broke_chars;
         let mut chunk = [0u8; NOISE_CHUNK];
-        let mut corrupted: usize = 0;
-        written = {
-            let mut total: usize = 0;
-            while total < allowed {
-                let chunk_len = (allowed - total).min(NOISE_CHUNK);
-                ptr::copy_nonoverlapping(buf.add(total), chunk.as_mut_ptr(), chunk_len);
-                corrupted +=
-                    inject_noise(&mut rng, params.noise_probability, &mut chunk[..chunk_len]);
-                let n = (*pc).port[peer].rx.write_capped(&chunk[..chunk_len], cap);
-                total += n;
-                if n < chunk_len {
-                    // The peer's queue is at its cap; the rest is dropped.
-                    break;
-                }
+        let mut total: usize = 0;
+        let mut corrupted: u32 = 0;
+        let mut parity_errors: u32 = 0;
+        let mut frame_errors: u32 = 0;
+        while total < deliver_len {
+            let chunk_len = (deliver_len - total).min(NOISE_CHUNK);
+            ptr::copy_nonoverlapping(buf.add(total), chunk.as_mut_ptr(), chunk_len);
+            if params.emu_noise != 0 {
+                let report = inject_line_noise(
+                    &mut rng,
+                    params.noise_probability,
+                    writer_word_length,
+                    writer_parity,
+                    &mut broke_chars,
+                    &mut chunk[..chunk_len],
+                );
+                corrupted = corrupted.saturating_add(report.corrupted);
+                parity_errors = parity_errors.saturating_add(report.parity_errors);
+                frame_errors = frame_errors.saturating_add(report.frame_errors);
             }
-            total
-        };
-        (*pc).port[idx].rng_state = rng.0;
-        if corrupted != 0 && written != 0 {
-            // Only bytes that reached the ring can look corrupt to the reader,
-            // so never report more corruption than we delivered.
-            let seen = corrupted.min(written) as u32;
-            (*pc).port[peer].noise_count = (*pc).port[peer].noise_count.wrapping_add(seen);
-            // Simulated corruption is surfaced once per write as both a frame
-            // and a parity error (a real UART would pick one; both counters
-            // moving is the observable "noise happened" signal).
-            (*pc).port[peer].stats.FrameErrorCount =
-                (*pc).port[peer].stats.FrameErrorCount.wrapping_add(1);
-            (*pc).port[peer].stats.ParityErrorCount =
-                (*pc).port[peer].stats.ParityErrorCount.wrapping_add(1);
+            apply_data_mask(&mut chunk[..chunk_len], mask);
+            let n = (*pc).port[peer].rx.write_capped(&chunk[..chunk_len], cap);
+            total += n;
+            if n < chunk_len {
+                // 对端队列到达上限，剩余数据丢弃（由 overrun 逻辑计数）。
+                break;
+            }
         }
+        (*pc).port[idx].rng_state = rng.0;
+        (*pc).port[idx].broke_chars = broke_chars;
+        let peer_state = &mut (*pc).port[peer];
+        peer_state.noise_count = peer_state.noise_count.wrapping_add(corrupted);
+        peer_state.stats.ParityErrorCount = peer_state
+            .stats
+            .ParityErrorCount
+            .wrapping_add(parity_errors);
+        peer_state.stats.FrameErrorCount =
+            peer_state.stats.FrameErrorCount.wrapping_add(frame_errors);
+        if corrupted != 0 || parity_errors != 0 || frame_errors != 0 {
+            peer_state.pending_events |= SERIAL_EV_ERR;
+        }
+        written = total;
     } else {
         written = (*pc).port[peer]
             .rx
-            .write_capped(core::slice::from_raw_parts(buf, allowed), cap);
+            .write_capped(core::slice::from_raw_parts(buf, deliver_len), cap);
     }
 
     // --- 3) Overrun emulation (`emu_overrun`) ------------------------------

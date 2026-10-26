@@ -68,11 +68,12 @@ sdk.delete_pair(pair.id)?;
 |---|---|
 | `port_a`, `port_b` | 端口名；空串表示由后端自动分配（Unix 回填 `A{id}` / `B{id}`） |
 | `baud_emu` | 波特率时序仿真（写侧限速） |
-| `noise_enabled`, `noise_probability` | 噪声注入；概率单位 0.01%，范围 `0..=10000` |
+| `noise_enabled`, `noise_probability` | 线路噪声；概率分母 1e8，范围 `0..=100_000_000`（上游语义） |
+| `all_data_bits` | 保留全部 8 个数据位，不按两端字长截断；默认 `false` |
 | `overrun` | 对端队列满时按溢出丢字节并计数 |
 | `exclusive` | 独占打开（仅 Windows 内核驱动支持） |
 | `plugin` | 插件模式（仅 Windows） |
-| `pin_wiring_a`, `pin_wiring_b` | 引脚映射（仅 Windows） |
+| `pin_wiring_a`, `pin_wiring_b` | 每端 4 字节输出映射：RTS/DTR/OUT1/OUT2 → 对端 CTS/DSR/DCD/RI；默认 `[CTS, DSR\|DCD, 0, 0]`（仅 Windows） |
 
 不支持的能力位为 `false`；SDK 不会静默伪造参数。
 
@@ -146,7 +147,7 @@ UI 必须根据能力位隐藏不可用功能。完整矩阵见 [platforms.md](p
 let state = sdk.state();               // 平台默认状态文件
 
 let snapshot = state.save()?;          // 原子写入，返回写出的快照
-let json = state.export_json()?;       // 导出 JSON（schema = 1）
+let json = state.export_json()?;       // 导出 JSON（schema = 2）
 state.import_json(&json, RestoreOptions::default())?;
 
 let report = state.restore(

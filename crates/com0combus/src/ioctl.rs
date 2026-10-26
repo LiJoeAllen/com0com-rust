@@ -352,7 +352,7 @@ unsafe fn set_params(request: WDFREQUEST) -> (NTSTATUS, usize) {
     //
     // The write itself must hold the *pair* lock: the port driver reads
     // `(*pc).params` under that same lock (com0comport::readwrite::handle_write),
-    // and `Com0comPairParams` is 160 bytes — without the lock a port can observe
+    // and `Com0comPairParams` is 164 bytes — without the lock a port can observe
     // a torn update (e.g. emu_noise == 1 with a stale noise_probability == 0).
     // Lock order is bus -> pair everywhere; the port driver never takes the bus
     // lock, so this cannot deadlock.

@@ -300,7 +300,7 @@ mod tests {
         let mut p = params("COM15", "COM16");
         p.baud_emu = true;
         p.noise_enabled = true;
-        p.noise_probability = 2500;
+        p.noise_probability = 25_000_000;
         let created = backend.create_pair(None, &p).unwrap();
         assert_eq!(created.id, 0);
         assert_eq!(created.params, p);
@@ -378,7 +378,7 @@ mod tests {
             Err(SdkError::InvalidArgument(_))
         ));
         let bad = PairParams {
-            noise_probability: 10_001,
+            noise_probability: 100_000_001,
             ..PairParams::default()
         };
         assert!(matches!(

@@ -187,11 +187,12 @@ fn render() -> String {
          \x20   uint32_t baud_emu;\n\
          \x20   uint32_t overrun;\n\
          \x20   uint32_t noise_enabled;\n\
-         \x20   uint32_t noise_probability; /* 0.01% units, 0..=10000 */\n\
+         \x20   uint32_t noise_probability; /* denominator 100000000, 0..=100000000 */\n\
          \x20   uint32_t exclusive;\n\
          \x20   uint32_t plugin;\n\
          \x20   uint8_t pin_wiring_a[4];\n\
          \x20   uint8_t pin_wiring_b[4];\n\
+         \x20   uint32_t all_data_bits;\n\
          } c0c_params;\n\
          C0C_STATIC_ASSERT(sizeof(c0c_params) == C0C_SIZEOF_C0C_PARAMS, \"c0c_params layout\");\n\n",
     );
@@ -209,6 +210,7 @@ fn render() -> String {
          \x20   uint32_t plugin;\n\
          \x20   uint8_t pin_wiring_a[4];\n\
          \x20   uint8_t pin_wiring_b[4];\n\
+         \x20   uint32_t all_data_bits;\n\
          } c0c_pair_info;\n\
          C0C_STATIC_ASSERT(sizeof(c0c_pair_info) == C0C_SIZEOF_C0C_PAIR_INFO, \"c0c_pair_info layout\");\n\n",
     );

@@ -8,27 +8,32 @@
 pub const PAIR_PARAMS_NAME_LEN: usize = 32;
 pub const MAX_ENUM_PAIRS: usize = 64;
 
+use crate::constants::DEFAULT_PIN_WIRING;
+
 /// Per-pair configuration. Mirrors com0com's registry Parameters key
 /// (`HKLM\...\com0com\Parameters\{PortName}`).
 #[repr(C)]
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug)]
 pub struct Com0comPairParams {
     /// Wide-char port names for port A (index 0) and port B (index 1),
     /// e.g. "COM15". Empty string => let the COM Name Arbiter assign one.
     pub port_name: [[u16; PAIR_PARAMS_NAME_LEN]; 2],
-    pub emu_br: u32,            // 0/1: baud-rate (timing) emulation
-    pub emu_overrun: u32,       // 0/1: simulate receive buffer overrun
-    pub emu_noise: u32,         // 0/1: inject frame corruption
-    pub noise_probability: u32, // 0..10000 (0.01% units) when emu_noise
-    pub exclusive_mode: u32,    // 0/1: hide port while open by another app
-    pub plugin_mode: u32,       // 0/1: hide port until its peer is opened
+    pub emu_br: u32,      // 0/1: baud-rate (timing) emulation
+    pub emu_overrun: u32, // 0/1: simulate receive buffer overrun
+    pub emu_noise: u32,   // 0/1: inject frame corruption
+    /// 噪声概率，分母 100_000_000（0 表示不注入，100_000_000 表示全错）。
+    pub noise_probability: u32,
+    pub exclusive_mode: u32, // 0/1: hide port while open by another app
+    pub plugin_mode: u32,    // 0/1: hide port until its peer is opened
     /// Null-modem pin wiring for A and B (RTS/DTR/OUT1/OUT2 -> peer input).
     pub pin_wiring: [[u8; 4]; 2],
+    /// 0/1: 保留 8 个数据位，不按两端字长截断（上游 `AllDataBits`）。
+    pub all_data_bits: u32,
 }
 
 impl Com0comPairParams {
-    /// Const constructor. The derived `Default` is not a `const fn`, so this is
-    /// what `PairContext::new` (a `const fn`) uses to zero the field.
+    /// Const constructor. The `Default` impl below is not a `const fn`, so this
+    /// is what `PairContext::new` (a `const fn`) uses to seed the field.
     pub const fn new() -> Self {
         Com0comPairParams {
             port_name: [[0u16; PAIR_PARAMS_NAME_LEN]; 2],
@@ -38,8 +43,20 @@ impl Com0comPairParams {
             noise_probability: 0,
             exclusive_mode: 0,
             plugin_mode: 0,
-            pin_wiring: [[0u8; 4]; 2],
+            // 端口驱动按这四个字节把对端输出线映射成本端 MSR 输入线，
+            // 全零意味着 CTS/DSR/DCD/RI 恒为低。CREATE_PAIR 时若用户态还没
+            // 下发参数，总线用的就是这个默认值，所以必须落在上游默认接线
+            // （RTS->CTS、DTR->DSR 且 DTR->DCD）上，否则握手类程序会等不到
+            // CTS/DSR。需要"引脚全悬空"时由调用方显式写全零。
+            pin_wiring: DEFAULT_PIN_WIRING,
+            all_data_bits: 0,
         }
+    }
+}
+
+impl Default for Com0comPairParams {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -133,13 +150,13 @@ mod tests {
     // silently corrupts the IOCTL payloads.
     #[test]
     fn struct_sizes_are_stable() {
-        assert_eq!(size_of::<Com0comPairParams>(), 160);
-        assert_eq!(size_of::<CreatePairRequest>(), 164);
+        assert_eq!(size_of::<Com0comPairParams>(), 164);
+        assert_eq!(size_of::<CreatePairRequest>(), 168);
         assert_eq!(size_of::<DeletePairRequest>(), 4);
-        assert_eq!(size_of::<EnumPairEntry>(), 164);
-        assert_eq!(size_of::<EnumPairsResponse>(), 10500);
+        assert_eq!(size_of::<EnumPairEntry>(), 168);
+        assert_eq!(size_of::<EnumPairsResponse>(), 10756);
         assert_eq!(size_of::<GetParamsRequest>(), 8);
-        assert_eq!(size_of::<SetParamsRequest>(), 168);
+        assert_eq!(size_of::<SetParamsRequest>(), 172);
         assert_eq!(size_of::<PortLinkRequest>(), 8);
         assert_eq!(size_of::<PortLinkResponse>(), 8);
         assert_eq!(size_of::<PortUnlinkRequest>(), 16);
@@ -160,6 +177,7 @@ mod tests {
         assert_eq!(offset_of!(Com0comPairParams, exclusive_mode), 144);
         assert_eq!(offset_of!(Com0comPairParams, plugin_mode), 148);
         assert_eq!(offset_of!(Com0comPairParams, pin_wiring), 152);
+        assert_eq!(offset_of!(Com0comPairParams, all_data_bits), 160);
 
         assert_eq!(offset_of!(CreatePairRequest, pair_id), 0);
         assert_eq!(offset_of!(CreatePairRequest, params), 4);
@@ -190,8 +208,8 @@ mod tests {
     }
 
     // `PairContext::new()` is a `const fn` and therefore cannot call the
-    // derived `Default`; `Com0comPairParams::new()` must produce the exact same
-    // all-zero layout.
+    // `Default` impl; `Com0comPairParams::new()` must produce the exact same
+    // field values.
     #[test]
     fn pair_params_const_new_matches_default() {
         let a = Com0comPairParams::new();
@@ -204,13 +222,15 @@ mod tests {
         assert_eq!(a.exclusive_mode, b.exclusive_mode);
         assert_eq!(a.plugin_mode, b.plugin_mode);
         assert_eq!(a.pin_wiring, b.pin_wiring);
-        // Everything is zeroed, which is what the bus writes on CREATE_PAIR
-        // when `setupc` passes no emu_* flags.
+        assert_eq!(a.all_data_bits, b.all_data_bits);
+        // Everything except the pin wiring is zeroed, which is what the bus
+        // writes on CREATE_PAIR when `setupc` passes no emu_* flags.
         assert_eq!(a.emu_br, 0);
         assert_eq!(a.emu_noise, 0);
         assert_eq!(a.emu_overrun, 0);
         assert_eq!(a.noise_probability, 0);
-        assert_eq!(a.pin_wiring, [[0u8; 4]; 2]);
+        assert_eq!(a.pin_wiring, DEFAULT_PIN_WIRING);
+        assert_eq!(a.all_data_bits, 0);
     }
 
     #[test]
@@ -236,7 +256,7 @@ mod tests {
         let copy = req;
         assert_eq!(copy.pair_id, 0xDEAD_BEEF);
         assert_eq!(copy.params.emu_br, 1);
-        // Default params leave pin_wiring zeroed.
-        assert_eq!(copy.params.pin_wiring, [[0u8; 4]; 2]);
+        // Default params carry the upstream null-modem wiring.
+        assert_eq!(copy.params.pin_wiring, DEFAULT_PIN_WIRING);
     }
 }

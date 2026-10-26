@@ -16,6 +16,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+use com0com_common::emulation::{apply_data_mask, data_mask, inject_line_noise, Xorshift32};
 use com0com_core::{PairParams, SdkError};
 
 use crate::links::{create_link, remove_link, LinkConfig};
@@ -117,6 +118,7 @@ impl PtyPair {
 
         let a_to_b = spawn_pump(
             pair.a.master,
+            pair.a.holder,
             pair.b.master,
             pair.b.holder,
             Arc::clone(&stop),
@@ -126,6 +128,7 @@ impl PtyPair {
         )?;
         let b_to_a = match spawn_pump(
             pair.b.master,
+            pair.b.holder,
             pair.a.master,
             pair.a.holder,
             Arc::clone(&stop),
@@ -349,6 +352,7 @@ fn io_error(op: &str) -> SdkError {
 
 fn spawn_pump(
     source: RawFd,
+    source_holder: RawFd,
     destination: RawFd,
     destination_holder: RawFd,
     stop: Arc<AtomicBool>,
@@ -361,6 +365,7 @@ fn spawn_pump(
         .spawn(move || {
             pump(
                 source,
+                source_holder,
                 destination,
                 destination_holder,
                 stop,
@@ -374,6 +379,7 @@ fn spawn_pump(
 
 fn pump(
     source: RawFd,
+    source_holder: RawFd,
     destination: RawFd,
     destination_holder: RawFd,
     stop: Arc<AtomicBool>,
@@ -382,6 +388,8 @@ fn pump(
     dropped: Arc<AtomicU64>,
 ) {
     let mut random = Xorshift32::new(seed);
+    // 跨读取保留的坏字符计数器，对应上游的 brokeChars。
+    let mut broke_chars = 0u16;
     let mut pacer = Pacer::default();
     let mut buffer = [0u8; READ_CHUNK];
     let mut poll_fd = [libc::pollfd {
@@ -416,7 +424,7 @@ fn pump(
         }
         let data = &mut buffer[..count];
 
-        let (baud_emu, noise_enabled, probability, overrun) = {
+        let (baud_emu, noise_enabled, probability, overrun, all_data_bits) = {
             let params = params
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -425,11 +433,30 @@ fn pump(
                 params.noise_enabled,
                 params.noise_probability,
                 params.overrun,
+                params.all_data_bits,
             )
         };
-        if noise_enabled && probability > 0 {
-            random.apply(data, probability);
+        // 发送端线路控制决定故障位槽位；接收端字长参与数据位掩码。
+        // Linux pty 会把两端都归一化成 8N，此时噪声按 8 数据位、无校验建模。
+        let (writer_word_length, writer_parity) = line_format(source_holder);
+        let (reader_word_length, _) = line_format(destination_holder);
+        if noise_enabled {
+            // 错误统计在 PTY 后端没有对应的 SERIALPERF_STATS 出口，
+            // 这里只负责让数据表现出上游一致的线路噪声。
+            let _ = inject_line_noise(
+                &mut random,
+                probability,
+                writer_word_length,
+                writer_parity,
+                &mut broke_chars,
+                data,
+            );
         }
+        // 掩码必须在噪声之后应用，与上游 CopyCharsWithEscape 的顺序一致。
+        apply_data_mask(
+            data,
+            data_mask(all_data_bits, reader_word_length, writer_word_length),
+        );
         if baud_emu {
             pacer.pace(destination_holder, data, &stop);
         }
@@ -440,40 +467,38 @@ fn pump(
     }
 }
 
-struct Xorshift32 {
-    state: u32,
+/// 从 termios 读取字长和校验位。
+///
+/// 返回 `(word_length, parity)`，其中 parity 使用 `SERIAL_LINE_CONTROL`
+/// 编码：0=None、1=Odd、2=Even。读取失败时按上电默认 8N1 处理。
+///
+/// 注意：Linux 的 pty 驱动会把 `CSIZE` 归一化为 `CS8` 并清掉 `PARENB`
+/// （即使应用 `tcsetattr` 成功，回读仍是 8N），因此 PTY 后端实际按 8N
+/// 建模；Windows 内核后端直接使用 `SERIAL_LINE_CONTROL`，不受此限制。
+fn line_format(fd: RawFd) -> (u8, u8) {
+    let mut termios: libc::termios = unsafe { std::mem::zeroed() };
+    if unsafe { libc::tcgetattr(fd, &mut termios) } != 0 {
+        return (8, 0);
+    }
+    decode_line_format(termios.c_cflag)
 }
 
-impl Xorshift32 {
-    fn new(seed: u32) -> Self {
-        Self {
-            state: if seed == 0 { 0x9E37_79B9 } else { seed },
-        }
-    }
-
-    fn next(&mut self) -> u32 {
-        let mut value = self.state;
-        value ^= value << 13;
-        value ^= value >> 17;
-        value ^= value << 5;
-        self.state = value;
-        value
-    }
-
-    /// Flip one random bit per byte with probability `probability / 10000`.
-    fn apply(&mut self, data: &mut [u8], probability: u16) {
-        if probability >= 10_000 {
-            for byte in data.iter_mut() {
-                *byte ^= 1 << (self.next() % 8);
-            }
-            return;
-        }
-        for byte in data.iter_mut() {
-            if self.next() % 10_000 < probability as u32 {
-                *byte ^= 1 << (self.next() % 8);
-            }
-        }
-    }
+/// 把 termios 的 `c_cflag` 解码成 `(字长, 校验位)`，便于脱离 PTY 单测。
+fn decode_line_format(cflag: libc::tcflag_t) -> (u8, u8) {
+    let word_length = match cflag & libc::CSIZE {
+        libc::CS5 => 5,
+        libc::CS6 => 6,
+        libc::CS7 => 7,
+        _ => 8,
+    };
+    let parity = if cflag & libc::PARENB == 0 {
+        0
+    } else if cflag & libc::PARODD != 0 {
+        1
+    } else {
+        2
+    };
+    (word_length, parity)
 }
 
 #[derive(Default)]
@@ -630,21 +655,27 @@ mod tests {
     use super::*;
 
     #[test]
-    fn noise_is_deterministic_and_bounded() {
-        let mut first = Xorshift32::new(42);
-        let mut second = Xorshift32::new(42);
-        let mut a = vec![0u8; 4096];
-        let mut b = vec![0u8; 4096];
-        first.apply(&mut a, 1000);
-        second.apply(&mut b, 1000);
-        assert_eq!(a, b);
-        let changed = a.iter().filter(|byte| **byte != 0).count();
-        // ~10% of 4096 bytes, with plenty of slack for the PRNG.
-        assert!((250..600).contains(&changed), "changed {changed} bytes");
+    fn line_format_decodes_csize_and_parity() {
+        assert_eq!(decode_line_format(libc::CS5), (5, 0));
+        assert_eq!(decode_line_format(libc::CS6 | libc::PARENB), (6, 2));
+        assert_eq!(
+            decode_line_format(libc::CS7 | libc::PARENB | libc::PARODD),
+            (7, 1)
+        );
+        assert_eq!(decode_line_format(libc::CS8), (8, 0));
+    }
 
-        let mut all = vec![0u8; 10];
-        Xorshift32::new(7).apply(&mut all, 10_000);
-        assert!(all.iter().all(|byte| *byte != 0));
+    #[test]
+    fn pty_defaults_to_eight_data_bits() {
+        let (master, target) = open_pty().unwrap();
+        let holder = open_slave(&target).unwrap();
+        // Linux pty 会忽略 CS7/PARENB 并回读为 8N；锁定该事实，说明 PTY
+        // 噪声模型实际总是 8 数据位、无校验。
+        assert_eq!(line_format(holder), (8, 0));
+        unsafe {
+            libc::close(holder);
+            libc::close(master);
+        }
     }
 
     fn set_output_speed(fd: RawFd, speed: libc::speed_t) {

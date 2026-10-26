@@ -185,6 +185,9 @@ pub struct PortState {
     /// Cumulative count of bytes corrupted by noise injection. Purely an
     /// observability counter (not part of `SERIALPERF_STATS`).
     pub noise_count: u32,
+    /// 还有多少个后续字符应继续作为坏字符发送（上游 `brokeChars`）。
+    /// 起始位/停止位故障会把它置为 `RAND() % 512`，跨多次写入保留。
+    pub broke_chars: u16,
     pub stats: SERIALPERF_STATS,
 }
 
@@ -212,6 +215,7 @@ impl PortState {
             xoff_remaining: 0,
             tx_halted: 0,
             noise_count: 0,
+            broke_chars: 0,
             stats: SERIALPERF_STATS {
                 ReceivedCount: 0,
                 TransmittedCount: 0,
@@ -390,6 +394,7 @@ mod tests {
         assert_eq!(p.xoff_remaining, 0);
         assert_eq!(p.tx_halted, 0);
         assert_eq!(p.noise_count, 0);
+        assert_eq!(p.broke_chars, 0);
         assert_eq!(p.stats.ReceivedCount, 0);
         assert_eq!(p.stats.FrameErrorCount, 0);
         assert_eq!(p.stats.SerialOverrunErrorCount, 0);
@@ -420,7 +425,9 @@ mod tests {
         assert_eq!(pc.params.noise_probability, 0);
         assert_eq!(pc.params.exclusive_mode, 0);
         assert_eq!(pc.params.plugin_mode, 0);
-        assert_eq!(pc.params.pin_wiring, [[0u8; 4]; 2]);
+        // 接线例外：默认必须是上游空 Modem 映射，否则端口驱动在建对后
+        // 立刻读 MSR 会得到全零，CTS/DSR 永不有效。
+        assert_eq!(pc.params.pin_wiring, crate::constants::DEFAULT_PIN_WIRING);
         assert_eq!(pc.port[0].queue_limit, pc.port[1].queue_limit);
     }
 
