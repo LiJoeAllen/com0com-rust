@@ -176,7 +176,7 @@ jobs:
             --log "$out/check-pairs-unix-root.log"
       - name: Upload E2E log
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: unix-e2e-${{ matrix.os }}
           path: target/vm-test-results
