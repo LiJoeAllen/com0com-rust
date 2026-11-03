@@ -26,7 +26,7 @@ com0com-common = { path = "../com0com-common" }
 wdk-sys = "0.5"
 wdk-alloc = "0.4"
 wdk-panic = "0.4"
-wdk-build = "0.5"
+wdk-build = "0.6"
 
 [dependencies]
 com0com-common = { workspace = true }
