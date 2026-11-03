@@ -23,7 +23,7 @@ license = "MIT OR Apache-2.0"
 # crates/com0comport/Cargo.toml (the two drivers are separate roots).
 [workspace.dependencies]
 com0com-common = { path = "../com0com-common" }
-wdk = "0.4"
+wdk = "0.5"
 wdk-sys = "0.5"
 wdk-alloc = "0.4"
 wdk-panic = "0.4"
