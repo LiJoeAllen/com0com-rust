@@ -93,7 +93,7 @@ base64 = "0.22"
 libc = "0.2"
 # crates.io 的 windows-sys 仍停在 0.61.2；GitHub tag 74 对应 0.100.0。
 windows-sys = { git = "https://github.com/microsoft/windows-rs", tag = "74" }
-wdk = "0.4"
+wdk = "0.5"
 wdk-sys = "0.5"
 wdk-alloc = "0.4"
 wdk-panic = "0.4"
